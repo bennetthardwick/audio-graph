@@ -9,3 +9,4 @@ edition = "2018"
 [dependencies]
 log = "*"
 uuid = "0.8.1"
+sample = "0.10.0"
