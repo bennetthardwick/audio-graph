@@ -49,7 +49,7 @@ pub struct BufferPool<V: Default> {
 }
 
 impl<V: Default> BufferPool<V> {
-    fn new() -> BufferPool<V> {
+    pub fn new() -> BufferPool<V> {
         BufferPool {
             buffer: vec![],
             buffer_size: 1024,
@@ -81,7 +81,7 @@ impl<V: Default> BufferPool<V> {
         }
     }
 
-    fn set_index_set(&mut self, index: usize) -> Result<(), ()> {
+    fn set_index_used(&mut self, index: usize) -> Result<(), ()> {
         let mut used = self.used.borrow_mut();
         let used = used.as_mut_slice();
         update_index(used, index, true)
@@ -89,31 +89,38 @@ impl<V: Default> BufferPool<V> {
 
     fn find_free_index_and_use(&mut self) -> Result<usize, ()> {
         if let Ok(index) = self.find_free_index() {
-            self.set_index_set(index).unwrap();
+            self.set_index_used(index).unwrap();
             Ok(index)
         } else {
             Err(())
         }
     }
 
-    pub fn get(&self, id: &BufferPoolId) -> Option<&[V]> {
-        let index = id.index;
-        let start = index * self.buffer_size;
-        let end = start + self.buffer_size;
+    // pub fn get(&self, id: &BufferPoolId) -> Option<&[V]> {
+    //     let input_used = id.used.borrow();
+    //     let output_used = self.used.borrow();
 
-        self.buffer.get(start..end)
-    }
+    //     if &input_used as *const _ == &output_used as *const _ {
+    //         let index = id.index;
+    //         let start = index * self.buffer_size;
+    //         let end = start + self.buffer_size;
 
-    pub fn get_mut(&mut self, id: &BufferPoolId) -> Option<&mut [V]> {
-        let index = id.index;
-        let start = index * self.buffer_size;
-        let end = start + self.buffer_size;
+    //         self.buffer.get(start..end)
+    //     } else {
+    //         None
+    //     }
+    // }
 
-        self.buffer.get_mut(start..end)
-    }
+    // pub fn get_mut(&mut self, id: &BufferPoolId) -> Option<&mut [V]> {
+    //     let index = id.index;
+    //     let start = index * self.buffer_size;
+    //     let end = start + self.buffer_size;
+
+    //     self.buffer.get_mut(start..end)
+    // }
 
     pub fn capacity(&self) -> usize {
-        self.buffer.capacity() / self.buffer_size
+        self.buffer.len() / self.buffer_size
     }
 
     pub fn change_buffer_size(&mut self, new_buffer_size: usize) {
@@ -125,15 +132,16 @@ impl<V: Default> BufferPool<V> {
         self.buffer.len() / self.buffer_size
     }
 
-    pub fn resize(&mut self, new_len: usize) {
-        self.buffer
-            .resize_with(new_len * self.buffer_size, || V::default())
+    pub fn reserve(&mut self, additional: usize) {
+        self.resize(self.len() + additional);
     }
 
-    pub fn reserve(&mut self, additional: usize) {
-        self.buffer.reserve(additional * self.buffer_size);
+    // TODO: change this not to resize
+    pub fn resize(&mut self, new_len: usize) {
+        self.buffer
+            .resize_with(new_len * self.buffer_size, || V::default());
 
-        let capacity = self.buffer.capacity() / self.buffer_size;
+        let capacity = self.buffer.len() / self.buffer_size;
 
         let mut used_capacity = self.used.borrow().len() * BITS_IN_U32;
 
@@ -146,22 +154,44 @@ impl<V: Default> BufferPool<V> {
         }
     }
 
-    pub fn get_space(&mut self) -> Result<BufferPoolId, ()> {
+    pub fn get_space<'a, 'b>(&'a mut self) -> Result<BufferPoolReference<'b, V>, ()> {
         self.find_free_index_and_use().and_then(|index| {
-            Ok(BufferPoolId {
+            let slice = unsafe {
+                std::slice::from_raw_parts_mut(
+                    self.buffer.as_mut_ptr().add(index * self.buffer_size),
+                    self.buffer_size,
+                )
+            };
+
+            Ok(BufferPoolReference {
                 index,
                 used: Rc::clone(&self.used),
+                slice,
             })
         })
     }
 }
 
-pub struct BufferPoolId {
+pub struct BufferPoolReference<'a, V> {
     index: usize,
     used: Used<u32>,
+    slice: &'a mut [V],
 }
 
-impl Drop for BufferPoolId {
+impl<V> AsMut<[V]> for BufferPoolReference<'_, V> {
+    fn as_mut(&mut self) -> &mut [V] {
+        self.slice
+    }
+}
+
+impl<V> AsRef<[V]> for BufferPoolReference<'_, V> {
+    fn as_ref(&self) -> &[V] {
+        self.slice
+    }
+}
+
+
+impl<V> Drop for BufferPoolReference<'_, V> {
     fn drop(&mut self) {
         let mut used = self.used.borrow_mut();
         let used = used.as_mut_slice();
@@ -211,7 +241,7 @@ mod tests {
 
         assert_eq!(pool.capacity(), 1);
 
-        pool.reserve(2);
+        pool.reserve(1);
 
         assert_eq!(pool.capacity(), 2);
     }
@@ -224,7 +254,7 @@ mod tests {
 
         assert!(pool.get_space().is_err());
 
-        pool.reserve(1);
+        pool.resize(1);
 
         let index = pool.get_space().unwrap();
 
