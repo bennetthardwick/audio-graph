@@ -1,7 +1,7 @@
 extern crate sample;
 
-mod route;
-mod graph;
+pub mod route;
+pub mod graph;
 
 #[cfg(test)]
 mod tests {

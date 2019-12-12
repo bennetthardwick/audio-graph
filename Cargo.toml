@@ -8,5 +8,6 @@ edition = "2018"
 
 [dependencies]
 log = "*"
-uuid = "0.8.1"
+uuid = { version = "0.8", features = ["v4"] }
 sample = "0.10.0"
+bufferpool = "0.1.5"
