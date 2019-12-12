@@ -7,13 +7,13 @@ pub trait NodeId {
     fn generate_node_id() -> Self;
 }
 
-pub struct Connection<Id> {
+pub struct Connection<Id, S: Sample> {
     pub(crate) id: Id,
-    amount: f32,
+    pub(crate) amount: S,
 }
 
-impl<Id> Connection<Id> {
-    pub fn new(id: Id, amount: f32) -> Connection<Id> {
+impl<Id, S: Sample> Connection<Id, S> {
+    pub fn new(id: Id, amount: S) -> Connection<Id, S> {
         Connection { id, amount }
     }
 
@@ -24,10 +24,10 @@ impl<Id> Connection<Id> {
 
 pub struct Node<Id: NodeId, S: Sample> {
     pub(crate) id: Id,
-    channels: usize,
-    buffers: Vec<BufferPoolReference<S>>,
-    pub(crate) connections: Vec<Connection<Id>>,
-    route: Box<dyn Route<S>>,
+    pub(crate) channels: usize,
+    pub(crate) buffers: Vec<BufferPoolReference<S>>,
+    pub(crate) connections: Vec<Connection<Id, S>>,
+    pub(crate) route: Box<dyn Route<S>>,
 }
 
 impl<Id: NodeId, S: Sample> Node<Id, S> {
@@ -35,7 +35,7 @@ impl<Id: NodeId, S: Sample> Node<Id, S> {
         id: Id,
         channels: usize,
         route: Box<dyn Route<S>>,
-        connections: Vec<Connection<Id>>,
+        connections: Vec<Connection<Id, S>>,
     ) -> Node<Id, S> {
         Node {
             id,
@@ -49,7 +49,7 @@ impl<Id: NodeId, S: Sample> Node<Id, S> {
     pub fn new(
         channels: usize,
         route: Box<dyn Route<S>>,
-        connections: Vec<Connection<Id>>,
+        connections: Vec<Connection<Id, S>>,
     ) -> Node<Id, S> {
         Self::with_id(Id::generate_node_id(), channels, route, connections)
     }
