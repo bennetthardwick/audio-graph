@@ -26,17 +26,12 @@ lazy_static! {
 
 #[bench]
 fn bench_dsp_chain_count_to_max(b: &mut Bencher) {
-    struct CountingNode {
-        current: f32,
-    }
+    struct CountingNode;
 
     impl dsp::Node<[f32; 1]> for CountingNode {
         fn audio_requested(&mut self, buffer: &mut [[f32; 1]], _sample_hz: f64) {
-            for sample in buffer.iter_mut() {
-                println!("counting");
-
-                sample[0] = self.current;
-                self.current += 1.;
+            for (index, sample) in buffer.iter_mut().enumerate() {
+                sample[0] = index as f32;
             }
         }
     }
@@ -46,7 +41,7 @@ fn bench_dsp_chain_count_to_max(b: &mut Bencher) {
     b.iter(|| {
         let mut buffer: Vec<[f32; 1]> = vec![[0.; 1]; std::u16::MAX as usize];
         let mut graph = dsp::Graph::new();
-        let counter = graph.add_node(CountingNode { current: 0. });
+        let counter = graph.add_node(CountingNode);
         graph.set_master(Some(counter));
         graph.audio_requested(&mut buffer, 44100.0);
         assert_eq!(buffer, test);
@@ -56,9 +51,7 @@ fn bench_dsp_chain_count_to_max(b: &mut Bencher) {
 #[bench]
 fn bench_audiograph_count_to_max(b: &mut Bencher) {
     #[derive(Debug)]
-    struct CountingNode {
-        current: f32,
-    }
+    struct CountingNode;
 
     impl audiograph::Route<f32> for CountingNode {
         fn process(
@@ -67,9 +60,8 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
             output: &mut [audiograph::BufferPoolReference<f32>],
             _frames: usize,
         ) {
-            for sample in output[0].as_mut().iter_mut() {
-                *sample = self.current;
-                self.current += 1.;
+            for (index, sample) in output[0].as_mut().iter_mut().enumerate() {
+                *sample = index as f32;
             }
         }
 
@@ -126,7 +118,7 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
 
         graph.add_node(audiograph::Node::new(
             1,
-            Box::new(CountingNode { current: 0. }),
+            Box::new(CountingNode),
             vec![audiograph::Connection::new(output_id, 1.)],
         ));
 
