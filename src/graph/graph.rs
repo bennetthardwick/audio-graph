@@ -55,6 +55,8 @@ pub struct RouteGraph<RouteId: NodeId, S: Sample + Default> {
     routes: Vec<RouteId>,
     route_map: HashMap<RouteId, Node<RouteId, S>>,
 
+    max_channels: usize,
+
     pool: BufferPool<S>,
 
     sorted: bool,
@@ -73,13 +75,16 @@ where
 
         let routes = nodes.iter().map(|node| node.id).collect::<Vec<RouteId>>();
 
+        let max_channels = nodes.iter().fold(0, |a, b| a.max(b.channels));
+
         let mut graph = RouteGraph {
             ordering: routes.clone(),
             routes,
             temp_ordering: Vec::with_capacity(nodes.len()),
             visited: HashSet::with_capacity(nodes.len()),
             stack: Vec::with_capacity(nodes.len()),
-            temp: vec![],
+            temp: Vec::with_capacity(max_channels),
+            max_channels,
             route_map: nodes.drain(..).map(|node| (node.id, node)).collect(),
             pool: BufferPool::default(),
             sorted: false,
@@ -104,6 +109,8 @@ where
             visited: HashSet::new(),
 
             temp: vec![],
+
+            max_channels: 0,
 
             routes: vec![],
             route_map: HashMap::new(),
@@ -204,6 +211,10 @@ where
         let routes = &self.routes;
         let route_map = &mut self.route_map;
 
+        for _ in 0..self.max_channels {
+            temp.push(self.pool.get_space().unwrap());
+        }
+
         for route in routes.iter() {
             if let Some(mut current) = route_map.remove(route) {
                 let buffers = &current.buffers;
@@ -214,10 +225,12 @@ where
 
                 for send in connections {
                     if let Some(out_route) = route_map.get_mut(&send.id) {
-                        for _ in 0..out_route.channels {
-                            out_route
-                                .buffers
-                                .push(self.pool.get_cleared_space().unwrap());
+                        if out_route.buffers.len() < out_route.channels {
+                            for _ in 0..(out_route.channels - out_route.buffers.len()) {
+                                out_route
+                                    .buffers
+                                    .push(self.pool.get_cleared_space().unwrap());
+                            }
                         }
 
                         for (output_vector, input_vector) in
@@ -228,7 +241,7 @@ where
                                 .iter_mut()
                                 .zip(input_vector.as_ref().iter())
                             {
-                                output.add_amp(
+                                *output = output.add_amp(
                                     input
                                         .mul_amp(send.amount.to_float_sample())
                                         .to_signed_sample(),
@@ -244,6 +257,8 @@ where
                 route_map.insert(*route, current);
             }
         }
+
+        temp.drain(..).for_each(drop);
     }
 
     pub fn silence_all_buffers(&mut self) {
@@ -263,6 +278,12 @@ where
         self.stack.reserve(1);
         self.sorted = false;
         self.pool.reserve(1);
+
+        self.max_channels = self.max_channels.max(route.channels);
+
+        if route.channels > self.temp.capacity() {
+            self.temp.reserve(route.channels - self.temp.capacity());
+        }
 
         self.route_map.insert(id, route);
     }
@@ -407,6 +428,59 @@ mod tests {
     }
 
     #[test]
+    fn test_multiple_outs_signal_flow() {
+        let source_id = Id::generate_node_id();
+        let a_id = Id::generate_node_id();
+        let b_id = Id::generate_node_id();
+        let c_id = Id::generate_node_id();
+        let output_id = Id::generate_node_id();
+
+        let source = Node::with_id(
+            source_id,
+            1,
+            Box::new(InputRoute {
+                input: vec![0.5; 32],
+            }),
+            vec![
+                Connection::new(a_id, 1.),
+                Connection::new(b_id, 0.5),
+                Connection::new(c_id, 0.5),
+            ],
+        );
+
+        let output = Node::with_id(
+            output_id,
+            1,
+            Box::new(OutputRoute {
+                output: vec![0.; 32],
+            }),
+            vec![],
+        );
+
+        let a = create_node(a_id, vec![output_id]);
+        let b = create_node(b_id, vec![output_id]);
+        let c = create_node(c_id, vec![output_id]);
+
+        let mut graph = RouteGraphBuilder::new().with_buffer_size(32).build();
+        graph.add_route(source);
+        graph.add_route(a);
+        graph.add_route(b);
+        graph.add_route(c);
+        graph.add_route(output);
+
+        assert_eq!(graph.verify(), true);
+
+        graph.process(32);
+
+        let route = &graph.route_map.get(&output_id).unwrap().route;
+
+        assert_eq!(
+            route.as_any().downcast_ref::<OutputRoute>().unwrap().output,
+            vec![1.; 32]
+        );
+    }
+
+    #[test]
     fn test_signal_flow() {
         let source_id = Id::generate_node_id();
         let a_id = Id::generate_node_id();
@@ -417,7 +491,7 @@ mod tests {
             source_id,
             1,
             Box::new(InputRoute {
-                input: vec![1.; 1024],
+                input: vec![1.; 32],
             }),
             vec![Connection::new(a_id, 1.)],
         );
@@ -425,7 +499,7 @@ mod tests {
             output_id,
             1,
             Box::new(OutputRoute {
-                output: vec![0.; 1024],
+                output: vec![0.; 32],
             }),
             vec![],
         );
@@ -433,7 +507,7 @@ mod tests {
         let a = create_node(a_id, vec![b_id]);
         let b = create_node(b_id, vec![output_id]);
 
-        let mut graph = RouteGraph::new();
+        let mut graph = RouteGraphBuilder::new().with_buffer_size(32).build();
         graph.add_route(source);
         graph.add_route(a);
         graph.add_route(b);
@@ -441,13 +515,13 @@ mod tests {
 
         assert_eq!(graph.verify(), true);
 
-        graph.process(1024);
+        graph.process(32);
 
         let route = &graph.route_map.get(&output_id).unwrap().route;
 
         assert_eq!(
             route.as_any().downcast_ref::<OutputRoute>().unwrap().output,
-            vec![1.; 1024]
+            vec![1.; 32]
         );
     }
 
