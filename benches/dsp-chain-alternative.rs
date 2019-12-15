@@ -112,24 +112,24 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
 
         let buffer_size = std::u16::MAX;
 
-        let mut graph = audiograph::RouteGraphBuilder::new()
-            .with_buffer_size(buffer_size as usize)
-            .build();
-
-        graph.add_node(audiograph::Node::new(
-            1,
-            Box::new(CountingNode),
-            vec![audiograph::Connection::new(output_id, 1.)],
-        ));
-
-        graph.add_node(audiograph::Node::with_id(
-            output_id,
-            1,
-            Box::new(OutputNode {
-                buffer: Rc::clone(&buffer),
-            }),
-            vec![],
-        ));
+        let mut graph = audiograph::RouteGraph::with_nodes(
+            vec![
+                audiograph::Node::new(
+                    1,
+                    Box::new(CountingNode),
+                    vec![audiograph::Connection::new(output_id, 1.)],
+                ),
+                audiograph::Node::with_id(
+                    output_id,
+                    1,
+                    Box::new(OutputNode {
+                        buffer: Rc::clone(&buffer),
+                    }),
+                    vec![],
+                ),
+            ],
+            buffer_size as usize,
+        );
 
         graph.process(buffer_size as usize);
 

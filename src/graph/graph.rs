@@ -66,33 +66,47 @@ impl<RouteId, S: Sample + Default> RouteGraph<RouteId, S>
 where
     RouteId: Eq + Hash + Copy + NodeId + Debug,
 {
-    pub fn with_nodes(
-        mut nodes: Vec<Node<RouteId, S>>,
-        buffer_size: usize,
-    ) -> RouteGraph<RouteId, S> {
+    pub fn with_nodes(nodes: Vec<Node<RouteId, S>>, buffer_size: usize) -> RouteGraph<RouteId, S> {
         // Increment the ordering, visited and stack so they can be used
         // for searching without having to alloc memeory
         let routes = nodes.iter().map(|node| node.id).collect::<Vec<RouteId>>();
 
+        println!("Routes {:?}", routes);
+
         let max_channels = nodes.iter().fold(0, |a, b| a.max(b.channels));
+
+        let capacity = nodes.len();
+
+        let route_map = nodes
+            .into_iter()
+            .map(|node| (node.id, node))
+            .collect::<HashMap<_, _>>();
+
+        println!("Map {:?}", route_map.values().len());
+        println!("Keys {:?}", route_map.keys());
 
         let mut graph = RouteGraph {
             ordering: routes.clone(),
             routes,
-            temp_ordering: Vec::with_capacity(nodes.len()),
-            visited: HashSet::with_capacity(nodes.len()),
-            stack: Vec::with_capacity(nodes.len()),
+            temp_ordering: Vec::with_capacity(capacity),
+            visited: HashSet::with_capacity(capacity),
+            stack: Vec::with_capacity(capacity),
             temp: Vec::with_capacity(max_channels),
             max_channels,
-            route_map: nodes.drain(..).map(|node| (node.id, node)).collect(),
-            pool: BufferPool::default(),
+            route_map,
+            pool: BufferPoolBuilder::new()
+                .with_capacity(0)
+                .with_buffer_size(0)
+                .build(),
             sorted: false,
         };
 
         let buffers = graph.count_required_temp_buffers();
 
+        println!("Final Keys {:?}", (&graph.route_map).keys().len());
+
         graph.pool = BufferPoolBuilder::new()
-            .with_capacity(buffers)
+            .with_capacity(buffers + max_channels)
             .with_buffer_size(buffer_size)
             .build();
 
@@ -135,6 +149,8 @@ where
             if let Some(current) = route_map.remove(route) {
                 let connections = &current.connections;
 
+                count += current.channels;
+
                 for send in connections {
                     if let Some(out_route) = route_map.get(&send.id) {
                         count += out_route.channels;
@@ -142,7 +158,9 @@ where
                 }
 
                 max = max.max(count);
-                count -= current.channels;
+                count -= current.channels.min(count);
+
+                route_map.insert(*route, current);
             }
         }
 
@@ -487,12 +505,10 @@ mod tests {
         let b = create_node(b_id, vec![output_id]);
         let c = create_node(c_id, vec![output_id]);
 
-        let mut graph = RouteGraphBuilder::new().with_buffer_size(32).build();
-        graph.add_node(source);
-        graph.add_node(a);
-        graph.add_node(b);
-        graph.add_node(c);
-        graph.add_node(output);
+        let mut graph = RouteGraphBuilder::new()
+            .with_buffer_size(32)
+            .with_nodes(vec![source, a, b, c, output])
+            .build();
 
         assert_eq!(graph.has_cycles(), false);
 
