@@ -72,7 +72,6 @@ where
     ) -> RouteGraph<RouteId, S> {
         // Increment the ordering, visited and stack so they can be used
         // for searching without having to alloc memeory
-
         let routes = nodes.iter().map(|node| node.id).collect::<Vec<RouteId>>();
 
         let max_channels = nodes.iter().fold(0, |a, b| a.max(b.channels));
@@ -98,6 +97,10 @@ where
             .build();
 
         graph
+    }
+
+    pub fn is_sorted(&self) -> bool {
+        self.sorted
     }
 
     // TODO: Add New Method
@@ -288,7 +291,7 @@ where
         self.route_map.insert(id, route);
     }
 
-    pub fn verify(&mut self) -> bool {
+    pub fn has_cycles(&mut self) -> bool {
         let visited = &mut (self.visited);
         visited.clear();
 
@@ -302,7 +305,7 @@ where
                             "Route {:?} has an out route that references visited route {:?}",
                             route_id, out_route.id
                         );
-                        return false;
+                        return true;
                     }
                 }
             }
@@ -310,7 +313,7 @@ where
 
         self.sorted = true;
 
-        true
+        false
     }
 }
 
@@ -468,7 +471,7 @@ mod tests {
         graph.add_route(c);
         graph.add_route(output);
 
-        assert_eq!(graph.verify(), true);
+        assert_eq!(graph.has_cycles(), false);
 
         graph.process(32);
 
@@ -513,7 +516,7 @@ mod tests {
         graph.add_route(b);
         graph.add_route(output);
 
-        assert_eq!(graph.verify(), true);
+        assert_eq!(graph.has_cycles(), false);
 
         graph.process(32);
 
@@ -538,12 +541,12 @@ mod tests {
         graph.add_route(a);
 
         assert_eq!(graph.routes, vec![b_id, a_id]);
-        assert_eq!(graph.verify(), false);
+        assert_eq!(graph.has_cycles(), true);
 
         graph.topographic_sort();
 
         assert_eq!(graph.routes, vec![a_id, b_id]);
-        assert_eq!(graph.verify(), true);
+        assert_eq!(graph.has_cycles(), false);
     }
 
     #[test]
@@ -572,12 +575,12 @@ mod tests {
         graph.add_route(c);
         graph.add_route(a);
 
-        assert_eq!(graph.verify(), false);
+        assert_eq!(graph.has_cycles(), true);
 
         graph.topographic_sort();
 
         assert_eq!(graph.routes, ids);
-        assert_eq!(graph.verify(), true);
+        assert_eq!(graph.has_cycles(), false);
     }
 
     #[test]
@@ -616,10 +619,10 @@ mod tests {
         graph.add_route(a);
         graph.add_route(c);
 
-        assert_eq!(graph.verify(), false);
+        assert_eq!(graph.has_cycles(), true);
 
         graph.topographic_sort();
 
-        assert_eq!(graph.verify(), true);
+        assert_eq!(graph.has_cycles(), false);
     }
 }
