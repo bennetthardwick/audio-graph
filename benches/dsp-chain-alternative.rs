@@ -14,9 +14,11 @@ use test::Bencher;
 use audiograph;
 use dsp;
 
+const BUFFER_SIZE: usize = 1024 * 1024;
+
 lazy_static! {
     static ref TEST_DATA: Vec<f32> = {
-        let mut test: Vec<f32> = vec![0.; std::u16::MAX as usize];
+        let mut test: Vec<f32> = vec![0.; BUFFER_SIZE];
         for (index, value) in test.iter_mut().enumerate() {
             *value = index as f32;
         }
@@ -39,7 +41,7 @@ fn bench_dsp_chain_count_to_max(b: &mut Bencher) {
     let test: Vec<[f32; 1]> = TEST_DATA.iter().cloned().map(|x| [x; 1]).collect();
 
     b.iter(|| {
-        let mut buffer: Vec<[f32; 1]> = vec![[0.; 1]; std::u16::MAX as usize];
+        let mut buffer: Vec<[f32; 1]> = vec![[0.; 1]; BUFFER_SIZE];
         let mut graph = dsp::Graph::new();
         let counter = graph.add_node(CountingNode);
         graph.set_master(Some(counter));
@@ -51,7 +53,9 @@ fn bench_dsp_chain_count_to_max(b: &mut Bencher) {
 #[bench]
 fn bench_audiograph_count_to_max(b: &mut Bencher) {
     #[derive(Debug)]
-    struct CountingNode;
+    struct CountingNode {
+        current: usize,
+    }
 
     impl audiograph::Route<f32> for CountingNode {
         fn process(
@@ -60,9 +64,12 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
             output: &mut [audiograph::BufferPoolReference<f32>],
             _frames: usize,
         ) {
+            let current = self.current;
             for (index, sample) in output[0].as_mut().iter_mut().enumerate() {
-                *sample = index as f32;
+                *sample = (current + index) as f32;
             }
+
+            self.current += output[0].as_ref().len();
         }
 
         fn as_any(&self) -> &dyn Any {
@@ -73,6 +80,7 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
     #[derive(Debug)]
     struct OutputNode {
         buffer: Rc<RefCell<Vec<f32>>>,
+        offset: usize,
     }
 
     impl audiograph::Route<f32> for OutputNode {
@@ -83,9 +91,15 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
             _frames: usize,
         ) {
             let mut buffer = self.buffer.borrow_mut();
-            for (input, output) in input[0].as_ref().iter().zip(buffer.iter_mut()) {
+            for (input, output) in input[0]
+                .as_ref()
+                .iter()
+                .zip(buffer[self.offset..].iter_mut())
+            {
                 *output = *input;
             }
+
+            self.offset += input[0].as_ref().len();
         }
 
         fn as_any(&self) -> &dyn Any {
@@ -105,18 +119,19 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
     let test: Vec<f32> = TEST_DATA.iter().cloned().collect();
 
     b.iter(|| {
-        let buffer: Vec<f32> = vec![0.; std::u16::MAX as usize];
+        let buffer: Vec<f32> = vec![0.; BUFFER_SIZE];
         let buffer = Rc::new(RefCell::new(buffer));
 
         let output_id = Id(1);
 
-        let buffer_size = std::u16::MAX;
+        let buffer_size = 1024;
+        let count = BUFFER_SIZE / buffer_size;
 
         let mut graph = audiograph::RouteGraph::with_nodes(
             vec![
                 audiograph::Node::new(
                     1,
-                    Box::new(CountingNode),
+                    Box::new(CountingNode { current: 0 }),
                     vec![audiograph::Connection::new(output_id, 1.)],
                 ),
                 audiograph::Node::with_id(
@@ -124,6 +139,7 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
                     1,
                     Box::new(OutputNode {
                         buffer: Rc::clone(&buffer),
+                        offset: 0,
                     }),
                     vec![],
                 ),
@@ -131,7 +147,9 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
             buffer_size as usize,
         );
 
-        graph.process(buffer_size as usize);
+        for _ in 0..count {
+            graph.process(buffer_size as usize);
+        }
 
         assert_eq!(*buffer.borrow(), test);
     });
