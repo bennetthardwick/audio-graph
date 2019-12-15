@@ -268,7 +268,7 @@ where
         self.pool.clear();
     }
 
-    pub fn add_route(&mut self, route: Node<RouteId, S>) {
+    pub fn add_node(&mut self, route: Node<RouteId, S>) {
         let id = route.id;
 
         self.routes.push(id);
@@ -418,6 +418,29 @@ mod tests {
         }
     }
 
+    #[derive(Debug)]
+    struct CountingNode {
+        current: usize,
+    }
+
+    impl Route<S> for CountingNode {
+        fn process(
+            &mut self,
+            _input: &[BufferPoolReference<S>],
+            output: &mut [BufferPoolReference<S>],
+            _frames: usize,
+        ) {
+            for sample in output[0].as_mut().iter_mut() {
+                *sample = self.current as f32;
+                self.current += 1;
+            }
+        }
+
+        fn as_any(&self) -> &dyn Any {
+            self
+        }
+    }
+
     fn create_node(id: Id, mut connections: Vec<Id>) -> Node<Id, f32> {
         Node::with_id(
             id,
@@ -465,11 +488,11 @@ mod tests {
         let c = create_node(c_id, vec![output_id]);
 
         let mut graph = RouteGraphBuilder::new().with_buffer_size(32).build();
-        graph.add_route(source);
-        graph.add_route(a);
-        graph.add_route(b);
-        graph.add_route(c);
-        graph.add_route(output);
+        graph.add_node(source);
+        graph.add_node(a);
+        graph.add_node(b);
+        graph.add_node(c);
+        graph.add_node(output);
 
         assert_eq!(graph.has_cycles(), false);
 
@@ -511,10 +534,10 @@ mod tests {
         let b = create_node(b_id, vec![output_id]);
 
         let mut graph = RouteGraphBuilder::new().with_buffer_size(32).build();
-        graph.add_route(source);
-        graph.add_route(a);
-        graph.add_route(b);
-        graph.add_route(output);
+        graph.add_node(source);
+        graph.add_node(a);
+        graph.add_node(b);
+        graph.add_node(output);
 
         assert_eq!(graph.has_cycles(), false);
 
@@ -529,6 +552,45 @@ mod tests {
     }
 
     #[test]
+    fn test_signal_flow_counting() {
+        let source_id = Id::generate_node_id();
+        let output_id = Id::generate_node_id();
+
+        let source = Node::with_id(
+            source_id,
+            1,
+            Box::new(CountingNode { current: 0 }),
+            vec![Connection::new(output_id, 1.)],
+        );
+        let output = Node::with_id(
+            output_id,
+            1,
+            Box::new(OutputRoute {
+                output: vec![0.; 1024],
+            }),
+            vec![],
+        );
+
+        let mut graph = RouteGraphBuilder::new().with_buffer_size(1024).build();
+        graph.add_node(source);
+        graph.add_node(output);
+
+        graph.process(1024);
+
+        let mut test: Vec<f32> = vec![0.; 1024];
+        for (index, value) in test.iter_mut().enumerate() {
+            *value = index as f32;
+        }
+
+        let route = &graph.route_map.get(&output_id).unwrap().route;
+
+        assert_eq!(
+            route.as_any().downcast_ref::<OutputRoute>().unwrap().output,
+            test
+        );
+    }
+
+    #[test]
     fn test_simple_topo_sort() {
         let a_id = Id::generate_node_id();
         let b_id = Id::generate_node_id();
@@ -537,8 +599,8 @@ mod tests {
         let b = create_node(b_id, vec![]);
 
         let mut graph = RouteGraph::new();
-        graph.add_route(b);
-        graph.add_route(a);
+        graph.add_node(b);
+        graph.add_node(a);
 
         assert_eq!(graph.routes, vec![b_id, a_id]);
         assert_eq!(graph.has_cycles(), true);
@@ -568,12 +630,12 @@ mod tests {
         let f = create_node(f_id, vec![]);
 
         let mut graph = RouteGraph::new();
-        graph.add_route(b);
-        graph.add_route(d);
-        graph.add_route(e);
-        graph.add_route(f);
-        graph.add_route(c);
-        graph.add_route(a);
+        graph.add_node(b);
+        graph.add_node(d);
+        graph.add_node(e);
+        graph.add_node(f);
+        graph.add_node(c);
+        graph.add_node(a);
 
         assert_eq!(graph.has_cycles(), true);
 
@@ -612,12 +674,12 @@ mod tests {
         let f = create_node(f_id, vec![]);
 
         let mut graph = RouteGraph::new();
-        graph.add_route(f);
-        graph.add_route(d);
-        graph.add_route(b);
-        graph.add_route(e);
-        graph.add_route(a);
-        graph.add_route(c);
+        graph.add_node(f);
+        graph.add_node(d);
+        graph.add_node(b);
+        graph.add_node(e);
+        graph.add_node(a);
+        graph.add_node(c);
 
         assert_eq!(graph.has_cycles(), true);
 

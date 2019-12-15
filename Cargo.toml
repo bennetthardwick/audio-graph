@@ -1,5 +1,5 @@
 [package]
-name = "audio-graph"
+name = "audiograph"
 version = "0.1.0"
 authors = ["Bennett Hardwick <me@bennetthardwick.com>"]
 edition = "2018"
@@ -11,3 +11,7 @@ log = "*"
 uuid = { version = "0.8", features = ["v4"] }
 sample = "0.10.0"
 bufferpool = "0.1.5"
+
+[dev-dependencies]
+dsp-chain = "0"
+lazy_static = "1"
