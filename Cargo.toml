@@ -1,6 +1,6 @@
 [package]
 name = "audiograph"
-version = "0.1.1"
+version = "0.1.2"
 authors = ["Bennett Hardwick <me@bennetthardwick.com>"]
 edition = "2018"
 license = "MIT"
@@ -14,7 +14,7 @@ keywords = [ "audio", "dsp", "graph" ]
 
 [dependencies]
 sample = "0.10.0"
-bufferpool = "0.1"
+bufferpool = "0.1.6"
 
 [dev-dependencies]
 uuid = { version = "0.8", features = ["v4"] }

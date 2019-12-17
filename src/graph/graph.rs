@@ -133,6 +133,10 @@ where
         graph
     }
 
+    pub fn buffer_size(&self) -> usize {
+        self.pool.get_buffer_size()
+    }
+
     pub fn is_sorted(&self) -> bool {
         self.sorted
     }

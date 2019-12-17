@@ -1,30 +1,44 @@
 use audiograph::*;
-use crossbeam::{bounded, channel::Receiver};
+use crossbeam::{bounded, channel::Receiver, channel::Sender};
 use std::io::Read;
 use uuid::Uuid;
 
+// Define some strings to be used throughout the application
 const APP_NAME: &str = "pass-through-audiograph";
 const OUT_L: &str = "out-l";
 const OUT_R: &str = "out-r";
-
 const IN_L: &str = "in-l";
 const IN_R: &str = "in-r";
 
-type S = f32;
+// Define the sample type to be used throughout the application.
+// Since Jack uses f32s, we'll do the same.
+type Sample = f32;
 
+// Routes are the basis of everything in RouteGraph.
+// To create input and to hear output a route needs to be created.
+// This is down by implementing the Route<Sample> trait.
+
+// Create a route for input. This will receive the audio from
+// Jack and pass it to our graph.
 struct InputRoute {
-    input: Receiver<Vec<&'static [S]>>,
+    // The crossbeam channel is a great way to send data
+    // around - especially between threads.
+    input: Receiver<Vec<&'static [Sample]>>,
+    returner: Sender<Vec<&'static [Sample]>>,
 }
 
-impl Route<S> for InputRoute {
+// Implement route for the InputRoute
+impl Route<Sample> for InputRoute {
     fn process(
         &mut self,
-        _input: &[BufferPoolReference<S>],
-        output: &mut [BufferPoolReference<S>],
+        _input: &[BufferPoolReference<Sample>],
+        output: &mut [BufferPoolReference<Sample>],
         frames: usize,
     ) {
         if let Some(data) = self.input.try_iter().last() {
             for (output_stream, input_stream) in output.iter_mut().zip(data.iter()) {
+                // Loop through each stream of samples and pass it through.
+                // This will most likely get optimised into a single memcpy call.
                 for (output_sample, input_sample) in output_stream
                     .as_mut()
                     .iter_mut()
@@ -34,23 +48,30 @@ impl Route<S> for InputRoute {
                     *output_sample = *input_sample;
                 }
             }
+
+            self.returner.try_send(data).unwrap();
         }
     }
 }
 
+// Much like the InputRoute, create a route so that data can be
+// sent from within the graph back to the outside world.
 struct OutputRoute {
-    output: Receiver<Vec<&'static mut [S]>>,
+    output: Receiver<Vec<&'static mut [Sample]>>,
+    returner: Sender<Vec<&'static mut [Sample]>>,
 }
 
-impl Route<S> for OutputRoute {
+impl Route<Sample> for OutputRoute {
     fn process(
         &mut self,
-        input: &[BufferPoolReference<S>],
-        _output: &mut [BufferPoolReference<S>],
+        input: &[BufferPoolReference<Sample>],
+        _output: &mut [BufferPoolReference<Sample>],
         frames: usize,
     ) {
         if let Some(mut data) = self.output.try_iter().last() {
             for (output_stream, input_stream) in data.iter_mut().zip(input.iter()) {
+                // Basically the same thing as the InputRoute, but in reverse.
+                // Copy the data from the graph into the Jack output buffer.
                 for (output_sample, input_sample) in output_stream
                     .iter_mut()
                     .zip(input_stream.as_ref().iter())
@@ -59,10 +80,15 @@ impl Route<S> for OutputRoute {
                     *output_sample = *input_sample;
                 }
             }
+
+            self.returner.try_send(data).unwrap();
         }
     }
 }
 
+// RouteGraph also requires that each node have a unique id.
+// What Id you use is completely up to you, in this example I usea
+// a library called uuid.
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 struct Id(Uuid);
 
@@ -72,16 +98,21 @@ impl NodeId for Id {
     }
 }
 
+// There's many ways to represent routes inside the graph. To minimise
+// the amount of heap allocations, I've opted to use an enum instead of
+// Box<dyn Route<Sample>>. This also helps if I want to convert the route
+// back into it's original value.
 enum Routes {
     Input(InputRoute),
     Output(OutputRoute),
 }
 
-impl Route<S> for Routes {
+// Likewise, implement Route<Sample> for the Routes enum.
+impl Route<Sample> for Routes {
     fn process(
         &mut self,
-        input: &[BufferPoolReference<S>],
-        output: &mut [BufferPoolReference<S>],
+        input: &[BufferPoolReference<Sample>],
+        output: &mut [BufferPoolReference<Sample>],
         frames: usize,
     ) {
         match self {
@@ -92,51 +123,77 @@ impl Route<S> for Routes {
 }
 
 fn main() {
-    let client = jack::Client::new(
-        "pass-through-audiograph",
-        jack::ClientOptions::NO_START_SERVER,
-    )
-    .unwrap()
-    .0;
+    let client = jack::Client::new(APP_NAME, jack::ClientOptions::NO_START_SERVER)
+        .unwrap()
+        .0;
 
     let channels = 2;
 
-    let (output_send, output_recv) = bounded::<Vec<&'static mut [S]>>(1);
+    // A channel to send buffers back after being used
+
+    let (return_input_send, return_input_recv) = bounded::<Vec<&'static [Sample]>>(1);
+    let (return_output_send, return_output_recv) = bounded::<Vec<&'static mut [Sample]>>(1);
+
+    // Fill up the channel with some buffers to be used in the loop
+    return_output_send
+        .try_send(Vec::with_capacity(channels))
+        .unwrap();
+    return_input_send
+        .try_send(Vec::with_capacity(channels))
+        .unwrap();
+
+    // Create a channel to send data from Jack into the route.
+    let (output_send, output_recv) = bounded::<Vec<&'static mut [Sample]>>(1);
     let output_id = Id::generate_node_id();
-    let output_node: Node<Id, S, Routes> = Node::with_id(
+
+    // Create the Node to host the route. Nodes have a little bit of extra information
+    // that is used with the routing of the graph, such as the number of channels it has
+    // and the other nodes that it's connected to.
+    let output_node: Node<Id, Sample, Routes> = Node::with_id(
         output_id,
         channels,
         Routes::Output(OutputRoute {
             output: output_recv,
+            returner: return_output_send,
         }),
         vec![],
     );
 
-    let (input_send, input_recv) = bounded::<Vec<&'static [S]>>(1);
+    let (input_send, input_recv) = bounded::<Vec<&'static [Sample]>>(1);
     let input_id = Id::generate_node_id();
     let input_node = Node::with_id(
         input_id,
         channels,
-        Routes::Input(InputRoute { input: input_recv }),
+        Routes::Input(InputRoute {
+            input: input_recv,
+            returner: return_input_send,
+        }),
+        // Connect to the output route with an amplitude of 1
         vec![Connection::new(output_id, 1.)],
     );
 
+    // The initial buffer size for the graph. With Jack this can change all the time
+    // after the graph has been created - but this example doesn't support that.
     let buffer_size = client.buffer_size();
 
-    let mut graph: RouteGraph<Id, S, Routes> =
-        RouteGraph::with_nodes(vec![input_node, output_node], buffer_size as usize);
+    // Create a graph of just the input and output nodes.
+    let mut graph = RouteGraph::with_nodes(vec![input_node, output_node], buffer_size as usize);
 
-    // Node::with_id(input_id, Box::new(
-
+    // Get the specifications for input and output Jack ports
     let out_spec = jack::AudioOut::default();
     let in_spec = jack::AudioIn::default();
 
+    // Register the left and right out channels
     let mut out_l_port = client.register_port(OUT_L, out_spec).unwrap();
     let mut out_r_port = client.register_port(OUT_R, out_spec).unwrap();
 
+    // Register the left and right in channels
     let in_l_port = client.register_port(IN_L, in_spec).unwrap();
     let in_r_port = client.register_port(IN_R, in_spec).unwrap();
 
+    // Create the Jack callback. This function is called for every buffer that is requested from
+    // Jack. It's responsibility is to send the slices to the input and output routes and then
+    // process the graph.
     let process = jack::ClosureProcessHandler::new(
         move |_: &jack::Client, ps: &jack::ProcessScope| -> jack::Control {
             let in_l = in_l_port.as_slice(ps);
@@ -146,21 +203,28 @@ fn main() {
             let out_r = out_r_port.as_mut_slice(ps);
 
             unsafe {
-                input_send
-                    .try_send(vec![
-                        std::slice::from_raw_parts(in_l.as_ptr(), in_l.len()),
-                        std::slice::from_raw_parts(in_r.as_ptr(), in_r.len()),
-                    ])
-                    .unwrap();
+                if let Some(mut in_vec) = return_input_recv.try_iter().last() {
+                    in_vec.clear();
+                    in_vec.push(std::slice::from_raw_parts(in_l.as_ptr(), in_l.len()));
+                    in_vec.push(std::slice::from_raw_parts(in_r.as_ptr(), in_r.len()));
+                    input_send.try_send(in_vec).unwrap();
+                }
 
-                output_send
-                    .try_send(vec![
-                        std::slice::from_raw_parts_mut(out_l.as_mut_ptr(), out_l.len()),
-                        std::slice::from_raw_parts_mut(out_r.as_mut_ptr(), out_r.len()),
-                    ])
-                    .unwrap();
+                if let Some(mut out_vec) = return_output_recv.try_iter().last() {
+                    out_vec.clear();
+                    out_vec.push(std::slice::from_raw_parts_mut(
+                        out_l.as_mut_ptr(),
+                        out_l.len(),
+                    ));
+                    out_vec.push(std::slice::from_raw_parts_mut(
+                        out_r.as_mut_ptr(),
+                        out_r.len(),
+                    ));
+                    output_send.try_send(out_vec).unwrap();
+                }
             }
 
+            // Process the graph
             graph.process(in_l.len().min(out_l.len()));
 
             jack::Control::Continue
