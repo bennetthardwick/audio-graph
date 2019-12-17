@@ -37,15 +37,16 @@ impl Route<Sample> for InputRoute {
     ) {
         if let Some(data) = self.input.try_iter().last() {
             for (output_stream, input_stream) in output.iter_mut().zip(data.iter()) {
-                // Loop through each stream of samples and pass it through.
-                // This will most likely get optimised into a single memcpy call.
-                for (output_sample, input_sample) in output_stream
-                    .as_mut()
-                    .iter_mut()
-                    .zip(input_stream.iter())
-                    .take(frames)
-                {
-                    *output_sample = *input_sample;
+                // Copy all the data across.
+                unsafe {
+                    let len = output_stream
+                        .as_ref()
+                        .len()
+                        .min(input_stream.len())
+                        .min(frames);
+                    let dst = output_stream.as_mut().as_mut_ptr();
+                    let src = input_stream.as_ptr();
+                    std::ptr::copy_nonoverlapping(src, dst, len);
                 }
             }
 
@@ -70,14 +71,15 @@ impl Route<Sample> for OutputRoute {
     ) {
         if let Some(mut data) = self.output.try_iter().last() {
             for (output_stream, input_stream) in data.iter_mut().zip(input.iter()) {
-                // Basically the same thing as the InputRoute, but in reverse.
-                // Copy the data from the graph into the Jack output buffer.
-                for (output_sample, input_sample) in output_stream
-                    .iter_mut()
-                    .zip(input_stream.as_ref().iter())
-                    .take(frames)
-                {
-                    *output_sample = *input_sample;
+                // Copy all the data across.
+                unsafe {
+                    let len = output_stream
+                        .len()
+                        .min(input_stream.as_ref().len())
+                        .min(frames);
+                    let dst = output_stream.as_mut_ptr();
+                    let src = input_stream.as_ref().as_ptr();
+                    std::ptr::copy_nonoverlapping(src, dst, len);
                 }
             }
 
