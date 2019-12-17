@@ -1,10 +1,11 @@
 [package]
 name = "audiograph"
-version = "0.1.0"
+version = "0.1.1"
 authors = ["Bennett Hardwick <me@bennetthardwick.com>"]
 edition = "2018"
 license = "MIT"
 description = "An audio graph optimised for performance and limiting runtime allocations"
+repository = "https://github.com/bennetthardwick/audio-graph"
 readme = "README.md"
 categories = [ "algorithms", "data-structures", "multimedia" ]
 keywords = [ "audio", "dsp", "graph" ]
