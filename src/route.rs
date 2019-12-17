@@ -1,15 +1,22 @@
 use bufferpool::BufferPoolReference;
-use core::fmt::Debug;
 use sample::Sample;
-use std::any::Any;
 
-pub trait Route<S: Sample>: Debug {
+pub trait Route<S: Sample> {
     fn process(
         &mut self,
         input: &[BufferPoolReference<S>],
         output: &mut [BufferPoolReference<S>],
         frames: usize,
     );
+}
 
-    fn as_any(&self) -> &dyn Any;
+impl<S: Sample> Route<S> for Box<dyn Route<S>> {
+    fn process(
+        &mut self,
+        input: &[BufferPoolReference<S>],
+        output: &mut [BufferPoolReference<S>],
+        frames: usize,
+    ) {
+        (**self).process(input, output, frames);
+    }
 }

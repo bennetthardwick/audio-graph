@@ -1,30 +1,29 @@
 use crate::graph::node::NodeId;
-use log::{error, warn};
+use crate::route::Route;
 use sample::Sample;
 use std::collections::{HashMap, HashSet};
-use std::fmt::Debug;
 use std::hash::Hash;
 
 use crate::graph::node::Node;
 use bufferpool::{BufferPool, BufferPoolBuilder, BufferPoolReference};
 
-pub struct RouteGraphBuilder<RouteId: NodeId + Debug + Eq, S: Sample + Default> {
-    nodes: Vec<Node<RouteId, S>>,
+pub struct RouteGraphBuilder<RouteId: NodeId + Eq, S: Sample + Default, R: Route<S>> {
+    nodes: Vec<Node<RouteId, S, R>>,
     buffer_size: usize,
 }
 
-impl<RouteId, S: Sample + Default> RouteGraphBuilder<RouteId, S>
+impl<RouteId, S: Sample + Default, R: Route<S>> RouteGraphBuilder<RouteId, S, R>
 where
-    RouteId: Eq + Hash + Copy + NodeId + Debug,
+    RouteId: Eq + Hash + Copy + NodeId,
 {
-    pub fn new() -> RouteGraphBuilder<RouteId, S> {
+    pub fn new() -> RouteGraphBuilder<RouteId, S, R> {
         RouteGraphBuilder {
             nodes: vec![],
             buffer_size: 1024,
         }
     }
 
-    pub fn with_node(mut self, node: Node<RouteId, S>) -> Self {
+    pub fn with_node(mut self, node: Node<RouteId, S, R>) -> Self {
         self.nodes.push(node);
         self
     }
@@ -34,17 +33,17 @@ where
         self
     }
 
-    pub fn with_nodes(mut self, mut nodes: Vec<Node<RouteId, S>>) -> Self {
+    pub fn with_nodes(mut self, mut nodes: Vec<Node<RouteId, S, R>>) -> Self {
         self.nodes.extend(nodes.drain(..));
         self
     }
 
-    pub fn build(self) -> RouteGraph<RouteId, S> {
+    pub fn build(self) -> RouteGraph<RouteId, S, R> {
         RouteGraph::with_nodes(self.nodes, self.buffer_size)
     }
 }
 
-pub struct RouteGraph<RouteId: NodeId, S: Sample + Default> {
+pub struct RouteGraph<RouteId: NodeId, S: Sample + Default, R: Route<S>> {
     ordering: Vec<RouteId>,
     temp_ordering: Vec<RouteId>,
     stack: Vec<RouteId>,
@@ -53,7 +52,7 @@ pub struct RouteGraph<RouteId: NodeId, S: Sample + Default> {
     temp: Vec<BufferPoolReference<S>>,
 
     routes: Vec<RouteId>,
-    route_map: HashMap<RouteId, Node<RouteId, S>>,
+    route_map: HashMap<RouteId, Node<RouteId, S, R>>,
 
     max_channels: usize,
 
@@ -62,16 +61,40 @@ pub struct RouteGraph<RouteId: NodeId, S: Sample + Default> {
     sorted: bool,
 }
 
-impl<RouteId, S: Sample + Default> RouteGraph<RouteId, S>
+// Implement Send and Sync if all the routes are Send.
+// The problem is buffer pool - which has a bunch of mutable
+// references and such. But RouteGraph should be fine to send
+// between threads so long as it's routes are safe to send
+// between threads.
+unsafe impl<RouteId, S, R> Send for RouteGraph<RouteId, S, R>
 where
-    RouteId: Eq + Hash + Copy + NodeId + Debug,
+    RouteId: NodeId,
+    S: Sample + Default,
+    R: Route<S> + Send,
 {
-    pub fn with_nodes(nodes: Vec<Node<RouteId, S>>, buffer_size: usize) -> RouteGraph<RouteId, S> {
+}
+
+unsafe impl<RouteId, S, R> Sync for RouteGraph<RouteId, S, R>
+where
+    RouteId: NodeId,
+    S: Sample + Default,
+    R: Route<S> + Send,
+{
+}
+
+impl<RouteId, S, R> RouteGraph<RouteId, S, R>
+where
+    RouteId: Eq + Hash + Copy + NodeId,
+    S: Sample + Default,
+    R: Route<S>,
+{
+    pub fn with_nodes(
+        nodes: Vec<Node<RouteId, S, R>>,
+        buffer_size: usize,
+    ) -> RouteGraph<RouteId, S, R> {
         // Increment the ordering, visited and stack so they can be used
         // for searching without having to alloc memeory
         let routes = nodes.iter().map(|node| node.id).collect::<Vec<RouteId>>();
-
-        println!("Routes {:?}", routes);
 
         let max_channels = nodes.iter().fold(0, |a, b| a.max(b.channels));
 
@@ -81,9 +104,6 @@ where
             .into_iter()
             .map(|node| (node.id, node))
             .collect::<HashMap<_, _>>();
-
-        println!("Map {:?}", route_map.values().len());
-        println!("Keys {:?}", route_map.keys());
 
         let mut graph = RouteGraph {
             ordering: routes.clone(),
@@ -118,7 +138,7 @@ where
     }
 
     // TODO: Add New Method
-    pub fn new() -> RouteGraph<RouteId, S> {
+    pub fn new() -> RouteGraph<RouteId, S, R> {
         RouteGraph {
             ordering: vec![],
             temp_ordering: vec![],
@@ -211,8 +231,6 @@ where
                     if self.route_map.contains_key(&node) {
                         index -= 1;
                         ordering[index] = node;
-                    } else {
-                        error!("Node {:?} was targetted, despite not existing in map", node);
                     }
                 }
             }
@@ -286,7 +304,7 @@ where
         self.pool.clear();
     }
 
-    pub fn add_node(&mut self, route: Node<RouteId, S>) {
+    pub fn add_node(&mut self, route: Node<RouteId, S, R>) {
         let id = route.id;
 
         self.routes.push(id);
@@ -319,10 +337,6 @@ where
             if let Some(route) = self.route_map.get(route_id) {
                 for out_route in &route.connections {
                     if visited.contains(&out_route.id) {
-                        warn!(
-                            "Route {:?} has an out route that references visited route {:?}",
-                            route_id, out_route.id
-                        );
                         return true;
                     }
                 }
@@ -343,7 +357,6 @@ mod tests {
     use std::any::Any;
     use uuid::Uuid;
 
-    #[derive(Debug)]
     struct TestRoute;
 
     #[derive(Copy, Clone, Debug, Eq, PartialEq, Hash)]
@@ -367,7 +380,13 @@ mod tests {
         }
     }
 
+    trait AnyRoute<S: sample::Sample>: Route<S> {
+        fn as_any(&self) -> &dyn Any;
+    }
+
     type S = f32;
+    type R = Box<dyn AnyRoute<S>>;
+    type N = Node<Id, S, R>;
 
     impl Route<S> for TestRoute {
         fn process(
@@ -382,13 +401,14 @@ mod tests {
                 }
             }
         }
+    }
 
+    impl AnyRoute<S> for TestRoute {
         fn as_any(&self) -> &dyn Any {
             self
         }
     }
 
-    #[derive(Debug)]
     struct InputRoute {
         input: Vec<S>,
     }
@@ -406,13 +426,14 @@ mod tests {
                 }
             }
         }
+    }
 
+    impl AnyRoute<S> for InputRoute {
         fn as_any(&self) -> &dyn Any {
             self
         }
     }
 
-    #[derive(Debug)]
     struct OutputRoute {
         output: Vec<S>,
     }
@@ -430,13 +451,14 @@ mod tests {
                 }
             }
         }
+    }
 
+    impl AnyRoute<S> for OutputRoute {
         fn as_any(&self) -> &dyn Any {
             self
         }
     }
 
-    #[derive(Debug)]
     struct CountingNode {
         current: usize,
     }
@@ -453,13 +475,32 @@ mod tests {
                 self.current += 1;
             }
         }
+    }
 
+    impl AnyRoute<S> for CountingNode {
         fn as_any(&self) -> &dyn Any {
             self
         }
     }
 
-    fn create_node(id: Id, mut connections: Vec<Id>) -> Node<Id, f32> {
+    impl AnyRoute<S> for Box<dyn AnyRoute<S>> {
+        fn as_any(&self) -> &dyn Any {
+            (**self).as_any()
+        }
+    }
+
+    impl Route<S> for Box<dyn AnyRoute<S>> {
+        fn process(
+            &mut self,
+            input: &[BufferPoolReference<S>],
+            output: &mut [BufferPoolReference<S>],
+            frames: usize,
+        ) {
+            (**self).process(input, output, frames);
+        }
+    }
+
+    fn create_node(id: Id, mut connections: Vec<Id>) -> Node<Id, f32, R> {
         Node::with_id(
             id,
             1,
@@ -479,7 +520,7 @@ mod tests {
         let c_id = Id::generate_node_id();
         let output_id = Id::generate_node_id();
 
-        let source = Node::with_id(
+        let source: N = Node::with_id(
             source_id,
             1,
             Box::new(InputRoute {
@@ -492,7 +533,7 @@ mod tests {
             ],
         );
 
-        let output = Node::with_id(
+        let output: N = Node::with_id(
             output_id,
             1,
             Box::new(OutputRoute {
@@ -529,7 +570,7 @@ mod tests {
         let b_id = Id::generate_node_id();
         let output_id = Id::generate_node_id();
 
-        let source = Node::with_id(
+        let source: Node<Id, S, R> = Node::with_id(
             source_id,
             1,
             Box::new(InputRoute {
@@ -537,7 +578,7 @@ mod tests {
             }),
             vec![Connection::new(a_id, 1.)],
         );
-        let output = Node::with_id(
+        let output: Node<Id, S, R> = Node::with_id(
             output_id,
             1,
             Box::new(OutputRoute {
@@ -549,7 +590,7 @@ mod tests {
         let a = create_node(a_id, vec![b_id]);
         let b = create_node(b_id, vec![output_id]);
 
-        let mut graph = RouteGraphBuilder::new().with_buffer_size(32).build();
+        let mut graph: RouteGraph<Id, S, R> = RouteGraphBuilder::new().with_buffer_size(32).build();
         graph.add_node(source);
         graph.add_node(a);
         graph.add_node(b);
@@ -572,13 +613,13 @@ mod tests {
         let source_id = Id::generate_node_id();
         let output_id = Id::generate_node_id();
 
-        let source = Node::with_id(
+        let source: N = Node::with_id(
             source_id,
             1,
             Box::new(CountingNode { current: 0 }),
             vec![Connection::new(output_id, 1.)],
         );
-        let output = Node::with_id(
+        let output: N = Node::with_id(
             output_id,
             1,
             Box::new(OutputRoute {

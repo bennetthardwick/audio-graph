@@ -15,3 +15,5 @@ bufferpool = "0.1.5"
 [dev-dependencies]
 dsp-chain = "0"
 lazy_static = "1"
+jack = "0.6"
+crossbeam = "0.7"
