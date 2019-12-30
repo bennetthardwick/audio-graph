@@ -17,6 +17,6 @@ impl<S: Sample> Route<S> for Box<dyn Route<S>> {
         output: &mut [BufferPoolReference<S>],
         frames: usize,
     ) {
-        (**self).process(input, output, frames);
+        self.as_mut().process(input, output, frames);
     }
 }

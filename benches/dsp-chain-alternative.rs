@@ -5,8 +5,6 @@ extern crate test;
 extern crate lazy_static;
 
 use dsp::Node;
-use sample::*;
-use std::any::Any;
 use std::cell::RefCell;
 use std::rc::Rc;
 use test::Bencher;
@@ -53,11 +51,11 @@ fn bench_dsp_chain_count_to_max(b: &mut Bencher) {
 #[bench]
 fn bench_audiograph_count_to_max(b: &mut Bencher) {
     #[derive(Debug)]
-    struct CountingNode {
+    struct CountingRoute {
         current: usize,
     }
 
-    impl audiograph::Route<f32> for CountingNode {
+    impl audiograph::Route<f32> for CountingRoute {
         fn process(
             &mut self,
             _input: &[audiograph::BufferPoolReference<f32>],
@@ -71,19 +69,15 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
 
             self.current += output[0].as_ref().len();
         }
-
-        fn as_any(&self) -> &dyn Any {
-            self
-        }
     }
 
     #[derive(Debug)]
-    struct OutputNode {
+    struct OutputRoute {
         buffer: Rc<RefCell<Vec<f32>>>,
         offset: usize,
     }
 
-    impl audiograph::Route<f32> for OutputNode {
+    impl audiograph::Route<f32> for OutputRoute {
         fn process(
             &mut self,
             input: &[audiograph::BufferPoolReference<f32>],
@@ -101,9 +95,24 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
 
             self.offset += input[0].as_ref().len();
         }
+    }
 
-        fn as_any(&self) -> &dyn Any {
-            self
+    enum Routes {
+        Counting(CountingRoute),
+        Output(OutputRoute),
+    }
+
+    impl audiograph::Route<f32> for Routes {
+        fn process(
+            &mut self,
+            input: &[audiograph::BufferPoolReference<f32>],
+            output: &mut [audiograph::BufferPoolReference<f32>],
+            frames: usize,
+        ) {
+            match self {
+                Routes::Counting(route) => route.process(input, output, frames),
+                Routes::Output(route) => route.process(input, output, frames),
+            }
         }
     }
 
@@ -131,13 +140,13 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
             vec![
                 audiograph::Node::new(
                     1,
-                    Box::new(CountingNode { current: 0 }),
+                    Routes::Counting(CountingRoute { current: 0 }),
                     vec![audiograph::Connection::new(output_id, 1.)],
                 ),
                 audiograph::Node::with_id(
                     output_id,
                     1,
-                    Box::new(OutputNode {
+                    Routes::Output(OutputRoute {
                         buffer: Rc::clone(&buffer),
                         offset: 0,
                     }),
