@@ -3,6 +3,16 @@ rust:
   - stable
   - beta
   - nightly
+addons:
+  apt:
+    packages:
+      - binutils-dev
+      - jackd
+      - libcurl4-openssl-dev
+      - libdw-dev
+      - libelf-dev
+      - libjack-dev
+      - libjack0
 matrix:
   allow_failures:
     - rust: nightly
