@@ -22,31 +22,37 @@ impl<Id, S: Sample> Connection<Id, S> {
     }
 }
 
-pub struct Node<Id: NodeId, S: Sample, R: Route<S>> {
+pub struct Node<Id: NodeId, S: Sample, R: Route<S, C>, C> {
     pub(crate) id: Id,
     pub(crate) channels: usize,
     pub(crate) buffers: Vec<BufferPoolReference<S>>,
     pub(crate) connections: Vec<Connection<Id, S>>,
     pub(crate) route: R,
+    __context: std::marker::PhantomData<*const C>,
 }
 
-impl<Id: NodeId, S: Sample, R: Route<S>> Node<Id, S, R> {
+impl<Id: NodeId, S: Sample, R: Route<S, C>, C> Node<Id, S, R, C> {
     pub fn with_id(
         id: Id,
         channels: usize,
         route: R,
         connections: Vec<Connection<Id, S>>,
-    ) -> Node<Id, S, R> {
+    ) -> Node<Id, S, R, C> {
         Node {
             id,
             channels,
             buffers: Vec::with_capacity(channels),
             route,
             connections,
+            __context: std::marker::PhantomData::default(),
         }
     }
 
-    pub fn new(channels: usize, route: R, connections: Vec<Connection<Id, S>>) -> Node<Id, S, R> {
+    pub fn new(
+        channels: usize,
+        route: R,
+        connections: Vec<Connection<Id, S>>,
+    ) -> Node<Id, S, R, C> {
         Self::with_id(Id::generate_node_id(), channels, route, connections)
     }
 }

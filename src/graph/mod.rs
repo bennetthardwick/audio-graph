@@ -13,7 +13,7 @@ use std::hash::Hash;
 
 use bufferpool::{BufferPool, BufferPoolBuilder, BufferPoolReference};
 
-pub struct RouteGraph<Id: NodeId, S: Sample + Default, R: Route<S>> {
+pub struct RouteGraph<Id: NodeId, S: Sample + Default, R: Route<S, C>, C> {
     ordering: Vec<Id>,
     temp_ordering: Vec<Id>,
     stack: Vec<Id>,
@@ -22,7 +22,9 @@ pub struct RouteGraph<Id: NodeId, S: Sample + Default, R: Route<S>> {
     temp: Vec<BufferPoolReference<S>>,
 
     routes: Vec<Id>,
-    route_map: HashMap<Id, Node<Id, S, R>>,
+    route_map: HashMap<Id, Node<Id, S, R, C>>,
+
+    __context: std::marker::PhantomData<*const C>,
 
     max_channels: usize,
 
@@ -36,40 +38,43 @@ pub struct RouteGraph<Id: NodeId, S: Sample + Default, R: Route<S>> {
 // references and such. But RouteGraph should be fine to send
 // between threads so long as it's routes are safe to send
 // between threads.
-unsafe impl<Id, S, R> Send for RouteGraph<Id, S, R>
+unsafe impl<Id, S, R, C> Send for RouteGraph<Id, S, R, C>
 where
     Id: NodeId,
     S: Sample + Default,
-    R: Route<S> + Send,
+    R: Route<S, C> + Send,
 {
 }
 
-unsafe impl<Id, S, R> Sync for RouteGraph<Id, S, R>
+unsafe impl<Id, S, R, C> Sync for RouteGraph<Id, S, R, C>
 where
     Id: NodeId,
     S: Sample + Default,
-    R: Route<S> + Send,
+    R: Route<S, C> + Send,
 {
 }
 
-impl<Id, S, R> Default for RouteGraph<Id, S, R>
+impl<Id, S, R, C> Default for RouteGraph<Id, S, R, C>
 where
     Id: Eq + Hash + Copy + NodeId,
     S: Sample + Default,
-    R: Route<S>,
+    R: Route<S, C>,
 {
-    fn default() -> RouteGraph<Id, S, R> {
+    fn default() -> RouteGraph<Id, S, R, C> {
         RouteGraph::new()
     }
 }
 
-impl<Id, S, R> RouteGraph<Id, S, R>
+impl<Id, S, R, C> RouteGraph<Id, S, R, C>
 where
     Id: Eq + Hash + Copy + NodeId,
     S: Sample + Default,
-    R: Route<S>,
+    R: Route<S, C>,
 {
-    pub fn with_nodes(nodes: Vec<Node<Id, S, R>>, buffer_size: usize) -> RouteGraph<Id, S, R> {
+    pub fn with_nodes(
+        nodes: Vec<Node<Id, S, R, C>>,
+        buffer_size: usize,
+    ) -> RouteGraph<Id, S, R, C> {
         // Increment the ordering, visited and stack so they can be used
         // for searching without having to alloc memeory
         let routes = nodes.iter().map(|node| node.id).collect::<Vec<Id>>();
@@ -96,6 +101,7 @@ where
                 .with_capacity(0)
                 .with_buffer_size(0)
                 .build(),
+            __context: std::marker::PhantomData::default(),
             sorted: false,
         };
 
@@ -109,6 +115,61 @@ where
         graph
     }
 
+    pub fn process(&mut self, frames: usize, context: &mut C) {
+        let temp = &mut self.temp;
+        let routes = &self.routes;
+        let route_map = &mut self.route_map;
+
+        for _ in 0..self.max_channels {
+            temp.push(self.pool.get_space().unwrap());
+        }
+
+        for route in routes.iter() {
+            if let Some(mut current) = route_map.remove(route) {
+                let buffers = &current.buffers;
+                let node_route = &mut current.route;
+                let connections = &current.connections;
+
+                node_route.process(buffers, temp, frames, context);
+
+                for send in connections {
+                    if let Some(out_route) = route_map.get_mut(&send.id) {
+                        if out_route.buffers.len() < out_route.channels {
+                            for _ in 0..(out_route.channels - out_route.buffers.len()) {
+                                out_route
+                                    .buffers
+                                    .push(self.pool.get_cleared_space().unwrap());
+                            }
+                        }
+
+                        for (output_vector, input_vector) in
+                            out_route.buffers.iter_mut().zip(temp.iter())
+                        {
+                            for (output, input) in output_vector
+                                .as_mut()
+                                .iter_mut()
+                                .zip(input_vector.as_ref().iter())
+                            {
+                                *output = output.add_amp(
+                                    input
+                                        .mul_amp(send.amount.to_float_sample())
+                                        .to_signed_sample(),
+                                );
+                            }
+                        }
+                    }
+                }
+
+                // Remove the buffers that were left over from last time.
+                current.buffers.drain(..).for_each(drop);
+
+                route_map.insert(*route, current);
+            }
+        }
+
+        temp.drain(..).for_each(drop);
+    }
+
     pub fn buffer_size(&self) -> usize {
         self.pool.get_buffer_size()
     }
@@ -118,7 +179,7 @@ where
     }
 
     // TODO: Add better new Method
-    pub fn new() -> RouteGraph<Id, S, R> {
+    pub fn new() -> RouteGraph<Id, S, R, C> {
         RouteGraph {
             ordering: vec![],
             temp_ordering: vec![],
@@ -133,6 +194,8 @@ where
             route_map: HashMap::new(),
 
             pool: BufferPool::default(),
+
+            __context: std::marker::PhantomData::default(),
 
             sorted: false,
         }
@@ -225,66 +288,11 @@ where
         self.sorted = true;
     }
 
-    pub fn process(&mut self, frames: usize) {
-        let temp = &mut self.temp;
-        let routes = &self.routes;
-        let route_map = &mut self.route_map;
-
-        for _ in 0..self.max_channels {
-            temp.push(self.pool.get_space().unwrap());
-        }
-
-        for route in routes.iter() {
-            if let Some(mut current) = route_map.remove(route) {
-                let buffers = &current.buffers;
-                let node_route = &mut current.route;
-                let connections = &current.connections;
-
-                node_route.process(buffers, temp, frames);
-
-                for send in connections {
-                    if let Some(out_route) = route_map.get_mut(&send.id) {
-                        if out_route.buffers.len() < out_route.channels {
-                            for _ in 0..(out_route.channels - out_route.buffers.len()) {
-                                out_route
-                                    .buffers
-                                    .push(self.pool.get_cleared_space().unwrap());
-                            }
-                        }
-
-                        for (output_vector, input_vector) in
-                            out_route.buffers.iter_mut().zip(temp.iter())
-                        {
-                            for (output, input) in output_vector
-                                .as_mut()
-                                .iter_mut()
-                                .zip(input_vector.as_ref().iter())
-                            {
-                                *output = output.add_amp(
-                                    input
-                                        .mul_amp(send.amount.to_float_sample())
-                                        .to_signed_sample(),
-                                );
-                            }
-                        }
-                    }
-                }
-
-                // Remove the buffers that were left over from last time.
-                current.buffers.drain(..).for_each(drop);
-
-                route_map.insert(*route, current);
-            }
-        }
-
-        temp.drain(..).for_each(drop);
-    }
-
     pub fn silence_all_buffers(&mut self) {
         self.pool.clear();
     }
 
-    pub fn add_node(&mut self, route: Node<Id, S, R>) {
+    pub fn add_node(&mut self, route: Node<Id, S, R, C>) {
         let id = route.id;
 
         self.routes.push(id);
@@ -360,15 +368,16 @@ mod tests {
         }
     }
 
-    trait AnyRoute<S: sample::Sample>: Route<S> {
+    trait AnyRoute<S: sample::Sample>: Route<S, C> {
         fn as_any(&self) -> &dyn Any;
     }
 
     type S = f32;
+    type C = ();
     type R = Box<dyn AnyRoute<S>>;
-    type N = Node<Id, S, R>;
+    type N = Node<Id, S, R, C>;
 
-    impl Route<S> for TestRoute {
+    impl Route<S, C> for TestRoute {
         fn process(
             &mut self,
             input: &[BufferPoolReference<S>],
@@ -393,7 +402,7 @@ mod tests {
         input: Vec<S>,
     }
 
-    impl Route<S> for InputRoute {
+    impl Route<S, C> for InputRoute {
         fn process(
             &mut self,
             _input: &[BufferPoolReference<S>],
@@ -418,7 +427,7 @@ mod tests {
         output: Vec<S>,
     }
 
-    impl Route<S> for OutputRoute {
+    impl Route<S, C> for OutputRoute {
         fn process(
             &mut self,
             input: &[BufferPoolReference<S>],
@@ -443,7 +452,7 @@ mod tests {
         current: usize,
     }
 
-    impl Route<S> for CountingNode {
+    impl Route<S, C> for CountingNode {
         fn process(
             &mut self,
             _input: &[BufferPoolReference<S>],
@@ -469,7 +478,7 @@ mod tests {
         }
     }
 
-    impl Route<S> for Box<dyn AnyRoute<S>> {
+    impl Route<S, C> for Box<dyn AnyRoute<S>> {
         fn process(
             &mut self,
             input: &[BufferPoolReference<S>],
@@ -480,7 +489,7 @@ mod tests {
         }
     }
 
-    fn create_node(id: Id, mut connections: Vec<Id>) -> Node<Id, f32, R> {
+    fn create_node(id: Id, mut connections: Vec<Id>) -> Node<Id, f32, R, C> {
         Node::with_id(
             id,
             1,

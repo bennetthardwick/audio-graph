@@ -27,13 +27,24 @@ struct InputRoute {
     returner: Sender<Vec<&'static [Sample]>>,
 }
 
+struct Context<'a> {
+    pub(crate) in_l_port: &'a jack::Port<jack::AudioIn>,
+    pub(crate) in_r_port: &'a jack::Port<jack::AudioIn>,
+
+    pub(crate) out_l_port: &'a mut jack::Port<jack::AudioOut>,
+    pub(crate) out_r_port: &'a mut jack::Port<jack::AudioOut>,
+
+    pub(crate) ps: &'a jack::ProcessScope,
+}
+
 // Implement route for the InputRoute
-impl Route<Sample> for InputRoute {
+impl Route<Sample, Context<'_>> for InputRoute {
     fn process(
         &mut self,
         _input: &[BufferPoolReference<Sample>],
         output: &mut [BufferPoolReference<Sample>],
         frames: usize,
+        context: &mut Context,
     ) {
         if let Some(data) = self.input.try_iter().last() {
             for (output_stream, input_stream) in output.iter_mut().zip(data.iter()) {
@@ -62,12 +73,13 @@ struct OutputRoute {
     returner: Sender<Vec<&'static mut [Sample]>>,
 }
 
-impl Route<Sample> for OutputRoute {
+impl Route<Sample, Context<'_>> for OutputRoute {
     fn process(
         &mut self,
         input: &[BufferPoolReference<Sample>],
         _output: &mut [BufferPoolReference<Sample>],
         frames: usize,
+        context: &mut Context,
     ) {
         if let Some(mut data) = self.output.try_iter().last() {
             for (output_stream, input_stream) in data.iter_mut().zip(input.iter()) {
@@ -88,7 +100,7 @@ impl Route<Sample> for OutputRoute {
     }
 }
 
-// RouteGraph also requires that each node have a unique id.
+// RouteGraph also requires that each node have a unique id.git@github.com:bennetthardwick/audio-graph.git
 // What Id you use is completely up to you, in this example I usea
 // a library called uuid.
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
@@ -110,16 +122,17 @@ enum Routes {
 }
 
 // Likewise, implement Route<Sample> for the Routes enum.
-impl Route<Sample> for Routes {
+impl<'a> Route<Sample, Context<'a>> for Routes {
     fn process(
         &mut self,
         input: &[BufferPoolReference<Sample>],
         output: &mut [BufferPoolReference<Sample>],
         frames: usize,
+        context: &mut Context,
     ) {
         match self {
-            Routes::Input(route) => route.process(input, output, frames),
-            Routes::Output(route) => route.process(input, output, frames),
+            Routes::Input(route) => route.process(input, output, frames, context),
+            Routes::Output(route) => route.process(input, output, frames, context),
         }
     }
 }
@@ -151,7 +164,7 @@ fn main() {
     // Create the Node to host the route. Nodes have a little bit of extra information
     // that is used with the routing of the graph, such as the number of channels it has
     // and the other nodes that it's connected to.
-    let output_node: Node<Id, Sample, Routes> = Node::with_id(
+    let output_node: Node<Id, Sample, Routes, _> = Node::with_id(
         output_id,
         channels,
         Routes::Output(OutputRoute {
@@ -196,38 +209,48 @@ fn main() {
     // Create the Jack callback. This function is called for every buffer that is requested from
     // Jack. It's responsibility is to send the slices to the input and output routes and then
     // process the graph.
+    //
+
     let process = jack::ClosureProcessHandler::new(
         move |_: &jack::Client, ps: &jack::ProcessScope| -> jack::Control {
-            let in_l = in_l_port.as_slice(ps);
-            let in_r = in_r_port.as_slice(ps);
+            let frames = ps.n_frames();
 
-            let out_l = out_l_port.as_mut_slice(ps);
-            let out_r = out_r_port.as_mut_slice(ps);
+            let mut context = Context {
+                out_r_port: &mut out_r_port,
+                out_l_port: &mut out_l_port,
+                in_l_port: &in_l_port,
+                in_r_port: &in_r_port,
+                ps,
+            };
 
-            unsafe {
-                if let Some(mut in_vec) = return_input_recv.try_iter().last() {
-                    in_vec.clear();
-                    in_vec.push(std::slice::from_raw_parts(in_l.as_ptr(), in_l.len()));
-                    in_vec.push(std::slice::from_raw_parts(in_r.as_ptr(), in_r.len()));
-                    input_send.try_send(in_vec).unwrap();
-                }
+            graph.process(frames as usize, &mut context);
 
-                if let Some(mut out_vec) = return_output_recv.try_iter().last() {
-                    out_vec.clear();
-                    out_vec.push(std::slice::from_raw_parts_mut(
-                        out_l.as_mut_ptr(),
-                        out_l.len(),
-                    ));
-                    out_vec.push(std::slice::from_raw_parts_mut(
-                        out_r.as_mut_ptr(),
-                        out_r.len(),
-                    ));
-                    output_send.try_send(out_vec).unwrap();
-                }
-            }
+            // drop(context);
 
-            // Process the graph
-            graph.process(in_l.len().min(out_l.len()));
+            // unsafe {
+            //     if let Some(mut in_vec) = return_input_recv.try_iter().last() {
+            //         in_vec.clear();
+            //         in_vec.push(std::slice::from_raw_parts(in_l.as_ptr(), in_l.len()));
+            //         in_vec.push(std::slice::from_raw_parts(in_r.as_ptr(), in_r.len()));
+            //         input_send.try_send(in_vec).unwrap();
+            //     }
+
+            //     if let Some(mut out_vec) = return_output_recv.try_iter().last() {
+            //         out_vec.clear();
+            //         out_vec.push(std::slice::from_raw_parts_mut(
+            //             out_l.as_mut_ptr(),
+            //             out_l.len(),
+            //         ));
+            //         out_vec.push(std::slice::from_raw_parts_mut(
+            //             out_r.as_mut_ptr(),
+            //             out_r.len(),
+            //         ));
+            //         output_send.try_send(out_vec).unwrap();
+            //     }
+            // }
+
+            // // Process the graph
+            // graph.process(in_l.len().min(out_l.len()), &mut context);
 
             jack::Control::Continue
         },

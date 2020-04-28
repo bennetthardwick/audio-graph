@@ -12,6 +12,9 @@ keywords = [ "audio", "dsp", "graph" ]
 
 # See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
 
+# [profile.release]
+# debug = true
+
 [dependencies]
 sample = "0.10.0"
 bufferpool = "0.1.6"
@@ -25,3 +28,7 @@ crossbeam = "0.7"
 
 [badges]
 travis-ci = { repository = "https://github.com/bennetthardwick/audio-graph" }
+
+[[example]]
+name = "counting-node-bench"
+path = "benches/counting-node.rs"
