@@ -399,6 +399,7 @@ mod tests {
             input: &[BufferPoolReference<S>],
             output: &mut [BufferPoolReference<S>],
             _frames: usize,
+            _context: &mut C
         ) {
             for (a, b) in output.iter_mut().zip(input.iter()) {
                 for (output, input) in a.as_mut().iter_mut().zip(b.as_ref().iter()) {
@@ -424,6 +425,7 @@ mod tests {
             _input: &[BufferPoolReference<S>],
             output: &mut [BufferPoolReference<S>],
             _frames: usize,
+            _context: &mut C
         ) {
             for stream in output.iter_mut() {
                 for (output, input) in stream.as_mut().iter_mut().zip(self.input.iter()) {
@@ -449,6 +451,7 @@ mod tests {
             input: &[BufferPoolReference<S>],
             _output: &mut [BufferPoolReference<S>],
             _frames: usize,
+            _context: &mut C
         ) {
             for stream in input.iter() {
                 for (output, input) in self.output.iter_mut().zip(stream.as_ref().iter()) {
@@ -474,6 +477,7 @@ mod tests {
             _input: &[BufferPoolReference<S>],
             output: &mut [BufferPoolReference<S>],
             _frames: usize,
+            _context: &mut C
         ) {
             for sample in output[0].as_mut().iter_mut() {
                 *sample = self.current as f32;
@@ -500,8 +504,9 @@ mod tests {
             input: &[BufferPoolReference<S>],
             output: &mut [BufferPoolReference<S>],
             frames: usize,
+            context: &mut C
         ) {
-            (**self).process(input, output, frames);
+            (**self).process(input, output, frames, context);
         }
     }
 
@@ -558,7 +563,9 @@ mod tests {
 
         assert_eq!(graph.has_cycles(), false);
 
-        graph.process(32);
+        let mut c = ();
+
+        graph.process(32, &mut c);
 
         let route = &graph.route_map.get(&output_id).unwrap().route;
 
@@ -575,7 +582,7 @@ mod tests {
         let b_id = Id::generate_node_id();
         let output_id = Id::generate_node_id();
 
-        let source: Node<Id, S, R> = Node::with_id(
+        let source: Node<Id, S, R, C> = Node::with_id(
             source_id,
             1,
             Box::new(InputRoute {
@@ -583,7 +590,7 @@ mod tests {
             }),
             vec![Connection::new(a_id, 1.)],
         );
-        let output: Node<Id, S, R> = Node::with_id(
+        let output: Node<Id, S, R, C> = Node::with_id(
             output_id,
             1,
             Box::new(OutputRoute {
@@ -595,7 +602,7 @@ mod tests {
         let a = create_node(a_id, vec![b_id]);
         let b = create_node(b_id, vec![output_id]);
 
-        let mut graph: RouteGraph<Id, S, R> = RouteGraphBuilder::new().with_buffer_size(32).build();
+        let mut graph: RouteGraph<Id, S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
         graph.add_node(source);
         graph.add_node(a);
         graph.add_node(b);
@@ -603,7 +610,9 @@ mod tests {
 
         assert_eq!(graph.has_cycles(), false);
 
-        graph.process(32);
+        let mut c = ();
+
+        graph.process(32, &mut c);
 
         let route = &graph.route_map.get(&output_id).unwrap().route;
 
@@ -637,7 +646,9 @@ mod tests {
         graph.add_node(source);
         graph.add_node(output);
 
-        graph.process(1024);
+        let mut c = ();
+
+        graph.process(1024, &mut c);
 
         let mut test: Vec<f32> = vec![0.; 1024];
         for (index, value) in test.iter_mut().enumerate() {
