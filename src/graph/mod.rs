@@ -170,6 +170,14 @@ where
         temp.drain(..).for_each(drop);
     }
 
+    /// Change the graph buffer size
+    ///
+    /// # Panics
+    /// If any of the internal buffers have been borrowed
+    pub fn set_buffer_size(&mut self, buffer: usize) {
+        self.pool.change_buffer_size(buffer);
+    }
+
     pub fn buffer_size(&self) -> usize {
         self.pool.get_buffer_size()
     }
@@ -290,6 +298,10 @@ where
 
     pub fn silence_all_buffers(&mut self) {
         self.pool.clear();
+    }
+
+    pub fn len(&self) -> usize {
+        self.routes.len()
     }
 
     pub fn add_node(&mut self, route: Node<Id, S, R, C>) {

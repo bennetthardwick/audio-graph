@@ -1,5 +1,4 @@
 use audiograph::*;
-use crossbeam::{bounded, channel::Receiver, channel::Sender};
 use std::io::Read;
 use uuid::Uuid;
 
@@ -20,82 +19,80 @@ type Sample = f32;
 
 // Create a route for input. This will receive the audio from
 // Jack and pass it to our graph.
-struct InputRoute {
-    // The crossbeam channel is a great way to send data
-    // around - especially between threads.
-    input: Receiver<Vec<&'static [Sample]>>,
-    returner: Sender<Vec<&'static [Sample]>>,
+struct InputRoute;
+
+struct Context {
+    in_l_port: *const jack::Port<jack::AudioIn>,
+    in_r_port: *const jack::Port<jack::AudioIn>,
+
+    out_l_port: *mut jack::Port<jack::AudioOut>,
+    out_r_port: *mut jack::Port<jack::AudioOut>,
+
+    ps: *const jack::ProcessScope,
 }
 
-struct Context<'a> {
-    pub(crate) in_l_port: &'a jack::Port<jack::AudioIn>,
-    pub(crate) in_r_port: &'a jack::Port<jack::AudioIn>,
+impl Context {
+    fn get_audio_input(&self) -> [&[f32]; 2] {
+        unsafe {
+            let ps = &*self.ps;
 
-    pub(crate) out_l_port: &'a mut jack::Port<jack::AudioOut>,
-    pub(crate) out_r_port: &'a mut jack::Port<jack::AudioOut>,
+            let left = (&*self.in_l_port).as_slice(ps);
+            let right = (&*self.in_r_port).as_slice(ps);
 
-    pub(crate) ps: &'a jack::ProcessScope,
+            [left, right]
+        }
+    }
+
+    fn get_audio_output(&mut self) -> [&mut [f32]; 2] {
+        unsafe {
+            let ps = &*self.ps;
+
+            let left = (&mut *self.out_l_port).as_mut_slice(ps);
+            let right = (&mut *self.out_r_port).as_mut_slice(ps);
+
+            [left, right]
+        }
+    }
 }
 
 // Implement route for the InputRoute
-impl Route<Sample, Context<'_>> for InputRoute {
+impl Route<Sample, Context> for InputRoute {
     fn process(
         &mut self,
         _input: &[BufferPoolReference<Sample>],
         output: &mut [BufferPoolReference<Sample>],
-        frames: usize,
+        _frames: usize,
         context: &mut Context,
     ) {
-        if let Some(data) = self.input.try_iter().last() {
-            for (output_stream, input_stream) in output.iter_mut().zip(data.iter()) {
-                // Copy all the data across.
-                unsafe {
-                    let len = output_stream
-                        .as_ref()
-                        .len()
-                        .min(input_stream.len())
-                        .min(frames);
-                    let dst = output_stream.as_mut().as_mut_ptr();
-                    let src = input_stream.as_ptr();
-                    std::ptr::copy_nonoverlapping(src, dst, len);
-                }
+        for (output_stream, input_stream) in output.iter_mut().zip(context.get_audio_input().iter())
+        {
+            for (out_sample, in_sample) in
+                output_stream.as_mut().iter_mut().zip(input_stream.iter())
+            {
+                *out_sample = *in_sample;
             }
-
-            self.returner.try_send(data).unwrap();
         }
     }
 }
 
 // Much like the InputRoute, create a route so that data can be
 // sent from within the graph back to the outside world.
-struct OutputRoute {
-    output: Receiver<Vec<&'static mut [Sample]>>,
-    returner: Sender<Vec<&'static mut [Sample]>>,
-}
+struct OutputRoute;
 
-impl Route<Sample, Context<'_>> for OutputRoute {
+impl Route<Sample, Context> for OutputRoute {
     fn process(
         &mut self,
         input: &[BufferPoolReference<Sample>],
         _output: &mut [BufferPoolReference<Sample>],
-        frames: usize,
+        _frames: usize,
         context: &mut Context,
     ) {
-        if let Some(mut data) = self.output.try_iter().last() {
-            for (output_stream, input_stream) in data.iter_mut().zip(input.iter()) {
-                // Copy all the data across.
-                unsafe {
-                    let len = output_stream
-                        .len()
-                        .min(input_stream.as_ref().len())
-                        .min(frames);
-                    let dst = output_stream.as_mut_ptr();
-                    let src = input_stream.as_ref().as_ptr();
-                    std::ptr::copy_nonoverlapping(src, dst, len);
-                }
+        for (output_stream, input_stream) in
+            context.get_audio_output().iter_mut().zip(input.as_ref())
+        {
+            for (out_sample, in_sample) in output_stream.iter_mut().zip(input_stream.as_ref()) {
+                *out_sample = *in_sample;
             }
-
-            self.returner.try_send(data).unwrap();
         }
     }
 }
@@ -122,7 +119,7 @@ enum Routes {
 }
 
 // Likewise, implement Route<Sample> for the Routes enum.
-impl<'a> Route<Sample, Context<'a>> for Routes {
+impl<'a> Route<Sample, Context> for Routes {
     fn process(
         &mut self,
         input: &[BufferPoolReference<Sample>],
@@ -131,8 +128,8 @@ impl<'a> Route<Sample, Context<'a>> for Routes {
         context: &mut Context,
     ) {
         match self {
-            Routes::Input(route) => route.process(input, output, frames, context),
-            Routes::Output(route) => route.process(input, output, frames, context),
+            Routes::Input(r) => r.process(input, output, frames, context),
+            Routes::Output(r) => r.process(input, output, frames, context),
         }
     }
 }
@@ -144,45 +141,20 @@ fn main() {
 
     let channels = 2;
 
-    // A channel to send buffers back after being used
-
-    let (return_input_send, return_input_recv) = bounded::<Vec<&'static [Sample]>>(1);
-    let (return_output_send, return_output_recv) = bounded::<Vec<&'static mut [Sample]>>(1);
-
-    // Fill up the channel with some buffers to be used in the loop
-    return_output_send
-        .try_send(Vec::with_capacity(channels))
-        .unwrap();
-    return_input_send
-        .try_send(Vec::with_capacity(channels))
-        .unwrap();
-
     // Create a channel to send data from Jack into the route.
-    let (output_send, output_recv) = bounded::<Vec<&'static mut [Sample]>>(1);
     let output_id = Id::generate_node_id();
 
     // Create the Node to host the route. Nodes have a little bit of extra information
     // that is used with the routing of the graph, such as the number of channels it has
     // and the other nodes that it's connected to.
-    let output_node: Node<Id, Sample, Routes, _> = Node::with_id(
-        output_id,
-        channels,
-        Routes::Output(OutputRoute {
-            output: output_recv,
-            returner: return_output_send,
-        }),
-        vec![],
-    );
+    let output_node: Node<Id, Sample, Routes, _> =
+        Node::with_id(output_id, channels, Routes::Output(OutputRoute), vec![]);
 
-    let (input_send, input_recv) = bounded::<Vec<&'static [Sample]>>(1);
     let input_id = Id::generate_node_id();
     let input_node = Node::with_id(
         input_id,
         channels,
-        Routes::Input(InputRoute {
-            input: input_recv,
-            returner: return_input_send,
-        }),
+        Routes::Input(InputRoute),
         // Connect to the output route with an amplitude of 1
         vec![Connection::new(output_id, 1.)],
     );
@@ -209,11 +181,13 @@ fn main() {
     // Create the Jack callback. This function is called for every buffer that is requested from
     // Jack. It's responsibility is to send the slices to the input and output routes and then
     // process the graph.
-    //
-
     let process = jack::ClosureProcessHandler::new(
         move |_: &jack::Client, ps: &jack::ProcessScope| -> jack::Control {
-            let frames = ps.n_frames();
+            let frames = ps.n_frames() as usize;
+
+            if graph.buffer_size() < frames {
+                graph.set_buffer_size(frames);
+            }
 
             let mut context = Context {
                 out_r_port: &mut out_r_port,
@@ -223,34 +197,7 @@ fn main() {
                 ps,
             };
 
-            graph.process(frames as usize, &mut context);
-
-            // drop(context);
-
-            // unsafe {
-            //     if let Some(mut in_vec) = return_input_recv.try_iter().last() {
-            //         in_vec.clear();
-            //         in_vec.push(std::slice::from_raw_parts(in_l.as_ptr(), in_l.len()));
-            //         in_vec.push(std::slice::from_raw_parts(in_r.as_ptr(), in_r.len()));
-            //         input_send.try_send(in_vec).unwrap();
-            //     }
-
-            //     if let Some(mut out_vec) = return_output_recv.try_iter().last() {
-            //         out_vec.clear();
-            //         out_vec.push(std::slice::from_raw_parts_mut(
-            //             out_l.as_mut_ptr(),
-            //             out_l.len(),
-            //         ));
-            //         out_vec.push(std::slice::from_raw_parts_mut(
-            //             out_r.as_mut_ptr(),
-            //             out_r.len(),
-            //         ));
-            //         output_send.try_send(out_vec).unwrap();
-            //     }
-            // }
-
-            // // Process the graph
-            // graph.process(in_l.len().min(out_l.len()), &mut context);
+            graph.process(frames, &mut context);
 
             jack::Control::Continue
         },
