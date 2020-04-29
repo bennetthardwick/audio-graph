@@ -1,6 +1,6 @@
 [package]
 name = "audiograph"
-version = "0.1.2"
+version = "0.2.0"
 authors = ["Bennett Hardwick <me@bennetthardwick.com>"]
 edition = "2018"
 license = "MIT"
