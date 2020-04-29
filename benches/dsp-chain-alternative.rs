@@ -55,12 +55,13 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
         current: usize,
     }
 
-    impl audiograph::Route<f32> for CountingRoute {
+    impl audiograph::Route<f32, ()> for CountingRoute {
         fn process(
             &mut self,
             _input: &[audiograph::BufferPoolReference<f32>],
             output: &mut [audiograph::BufferPoolReference<f32>],
             _frames: usize,
+            _context: &mut (),
         ) {
             let current = self.current;
             for (index, sample) in output[0].as_mut().iter_mut().enumerate() {
@@ -77,12 +78,13 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
         offset: usize,
     }
 
-    impl audiograph::Route<f32> for OutputRoute {
+    impl audiograph::Route<f32, ()> for OutputRoute {
         fn process(
             &mut self,
             input: &[audiograph::BufferPoolReference<f32>],
             _output: &mut [audiograph::BufferPoolReference<f32>],
             _frames: usize,
+            _context: &mut (),
         ) {
             let mut buffer = self.buffer.borrow_mut();
             for (input, output) in input[0]
@@ -102,16 +104,17 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
         Output(OutputRoute),
     }
 
-    impl audiograph::Route<f32> for Routes {
+    impl audiograph::Route<f32, ()> for Routes {
         fn process(
             &mut self,
             input: &[audiograph::BufferPoolReference<f32>],
             output: &mut [audiograph::BufferPoolReference<f32>],
             frames: usize,
+            context: &mut (),
         ) {
             match self {
-                Routes::Counting(route) => route.process(input, output, frames),
-                Routes::Output(route) => route.process(input, output, frames),
+                Routes::Counting(route) => route.process(input, output, frames, context),
+                Routes::Output(route) => route.process(input, output, frames, context),
             }
         }
     }
@@ -156,8 +159,10 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
             buffer_size as usize,
         );
 
+        let mut c = ();
+
         for _ in 0..count {
-            graph.process(buffer_size as usize);
+            graph.process(buffer_size as usize, &mut c);
         }
 
         assert_eq!(*buffer.borrow(), test);
