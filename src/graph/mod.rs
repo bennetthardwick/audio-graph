@@ -116,6 +116,10 @@ where
     }
 
     pub fn process(&mut self, frames: usize, context: &mut C) {
+        if self.buffer_size() < frames {
+            self.set_buffer_size(frames);
+        }
+
         let temp = &mut self.temp;
         let routes = &self.routes;
         let route_map = &mut self.route_map;

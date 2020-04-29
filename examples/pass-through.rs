@@ -17,10 +17,15 @@ type Sample = f32;
 // To create input and to hear output a route needs to be created.
 // This is down by implementing the Route<Sample> trait.
 
-// Create a route for input. This will receive the audio from
-// Jack and pass it to our graph.
-struct InputRoute;
-
+// In order to pass information from the audio backend (in this example Jack)
+// a "context" object is used. This object contains everything that the routes
+// in the graph might need, with each route getting a mutable reference to it.
+//
+// The jack context passes through the process scope as well as references to
+// the input and output ports.
+//
+// Note: due to some lifetime issues with Rust, a bit of unsafe code is needed,
+// see here: https://users.rust-lang.org/t/phantomdata-const-t-causing-issues-with-lifetimes/41708
 struct Context {
     in_l_port: *const jack::Port<jack::AudioIn>,
     in_r_port: *const jack::Port<jack::AudioIn>,
@@ -32,6 +37,7 @@ struct Context {
 }
 
 impl Context {
+    // Get the two buffers of f32 that come from Jack
     fn get_audio_input(&self) -> [&[f32]; 2] {
         unsafe {
             let ps = &*self.ps;
@@ -43,6 +49,8 @@ impl Context {
         }
     }
 
+    // Get the two buffers of f32 that Jack will play once we fill
+    // them with audio.
     fn get_audio_output(&mut self) -> [&mut [f32]; 2] {
         unsafe {
             let ps = &*self.ps;
@@ -54,6 +62,10 @@ impl Context {
         }
     }
 }
+
+// Create a route for input. This recieves the audio from Jack and
+// passes it to our graph.
+struct InputRoute;
 
 // Implement route for the InputRoute
 impl Route<Sample, Context> for InputRoute {
@@ -97,8 +109,8 @@ impl Route<Sample, Context> for OutputRoute {
     }
 }
 
-// RouteGraph also requires that each node have a unique id.git@github.com:bennetthardwick/audio-graph.git
-// What Id you use is completely up to you, in this example I usea
+// RouteGraph also requires that each node have a unique id.
+// What Id you use is completely up to you, in this example I use
 // a library called uuid.
 #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
 struct Id(Uuid);
@@ -185,10 +197,6 @@ fn main() {
         move |_: &jack::Client, ps: &jack::ProcessScope| -> jack::Control {
             let frames = ps.n_frames() as usize;
 
-            if graph.buffer_size() < frames {
-                graph.set_buffer_size(frames);
-            }
-
             let mut context = Context {
                 out_r_port: &mut out_r_port,
                 out_l_port: &mut out_l_port,
@@ -203,6 +211,7 @@ fn main() {
         },
     );
 
+    // Activate the graph and start processing audio
     let active = client.activate_async((), process).unwrap();
 
     let system_out_1 = active
@@ -213,6 +222,7 @@ fn main() {
         .as_client()
         .port_by_name("system:playback_2")
         .unwrap();
+
     let out_l_port = active
         .as_client()
         .port_by_name(format!("{}:{}", APP_NAME, OUT_L).as_str())
@@ -221,6 +231,9 @@ fn main() {
         .as_client()
         .port_by_name(format!("{}:{}", APP_NAME, OUT_R).as_str())
         .unwrap();
+
+    // Connect the output to the system output.. sorry, you'll need to
+    // wire up the inputs yourself (with something like Catia)
     active
         .as_client()
         .connect_ports(&out_l_port, &system_out_1)
