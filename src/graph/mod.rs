@@ -303,6 +303,57 @@ where
         self.routes.len()
     }
 
+    // Set the volume / amount of a particular route
+    pub fn set_route_amount(&mut self, source: Id, target: Id, amount: S) {
+        self.with_node_connections(source, |connections| {
+            if let Some(position) = connections.iter().position(|c| &c.id == &target) {
+                if amount == S::equilibrium() {
+                    connections.swap_remove(position);
+                } else {
+                    connections.get_mut(position).unwrap().amount = amount;
+                }
+            } else {
+                if amount != S::equilibrium() {
+                    connections.push(Connection::new(target.clone(), amount))
+                }
+            }
+        });
+    }
+
+    pub fn with_node<T, F: FnOnce(&mut Node<Id, S, R, C, G>) -> T>(
+        &mut self,
+        id: Id,
+        func: F,
+    ) -> Option<T> {
+        self.route_map.get_mut(&id).map(func)
+    }
+
+    pub fn with_node_connections<T, F: FnOnce(&mut Vec<Connection<Id, S>>) -> T>(
+        &mut self,
+        id: Id,
+        func: F,
+    ) -> Option<T> {
+        self.with_node(id, |node| func(&mut node.connections))
+    }
+
+    pub fn remove_node(&mut self, id: Id) {
+        if let Some(position) = self.ordering.iter().position(|x| x == &id) {
+            self.ordering.swap_remove(position);
+        }
+
+        if let Some(position) = self.routes.iter().position(|x| x == &id) {
+            self.ordering.swap_remove(position);
+        }
+
+        self.route_map.remove(&id);
+
+        for (_, node) in self.route_map.iter_mut() {
+            node.connections.retain(|connection| &connection.id != &id);
+        }
+
+        self.sorted = false;
+    }
+
     pub fn add_node(&mut self, route: Node<Id, S, R, C, G>) {
         let id = &route.id;
 
