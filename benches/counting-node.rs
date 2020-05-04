@@ -1,8 +1,10 @@
 #[macro_use]
 extern crate lazy_static;
 
+use audiograph::NodeId;
 use std::cell::RefCell;
 use std::rc::Rc;
+use volatile_unique_id::*;
 
 use audiograph;
 
@@ -90,12 +92,12 @@ fn main() {
         }
     }
 
-    #[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
-    struct Id(u32);
+    #[derive(Debug, Eq, PartialEq, Clone, Hash)]
+    struct Id(volatile_unique_id::Id);
 
-    impl audiograph::NodeId for Id {
-        fn generate_node_id() -> Self {
-            Id(0)
+    impl audiograph::NodeId<Generator> for Id {
+        fn generate_node_id(generator: &mut Generator) -> Self {
+            Id(generator.generate())
         }
     }
 
@@ -103,11 +105,13 @@ fn main() {
 
     let iters = 10000;
 
+    let mut generator = GeneratorBuilder::new().build();
+
     for _ in 0..iters {
         let buffer: Vec<f32> = vec![0.; BUFFER_SIZE];
         let buffer = Rc::new(RefCell::new(buffer));
 
-        let output_id = Id(1);
+        let output_id = Id::generate_node_id(&mut generator);
 
         let buffer_size = 1024;
         let count = BUFFER_SIZE / buffer_size;
@@ -117,7 +121,8 @@ fn main() {
                 audiograph::Node::new(
                     1,
                     Routes::Counting(CountingRoute { current: 0 }),
-                    vec![audiograph::Connection::new(output_id, 1.)],
+                    vec![audiograph::Connection::new(output_id.clone(), 1.)],
+                    &mut generator,
                 ),
                 audiograph::Node::with_id(
                     output_id,

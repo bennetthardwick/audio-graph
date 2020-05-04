@@ -1,6 +1,6 @@
 use audiograph::*;
 use std::io::Read;
-use uuid::Uuid;
+use volatile_unique_id::*;
 
 // Define some strings to be used throughout the application
 const APP_NAME: &str = "pass-through-audiograph";
@@ -112,12 +112,12 @@ impl Route<Sample, Context> for OutputRoute {
 // RouteGraph also requires that each node have a unique id.
 // What Id you use is completely up to you, in this example I use
 // a library called uuid.
-#[derive(Debug, Eq, PartialEq, Copy, Clone, Hash)]
-struct Id(Uuid);
+#[derive(Debug, Eq, PartialEq, Clone, Hash)]
+struct Id(volatile_unique_id::Id);
 
-impl NodeId for Id {
-    fn generate_node_id() -> Self {
-        Id(Uuid::new_v4())
+impl NodeId<Generator> for Id {
+    fn generate_node_id(generator: &mut Generator) -> Self {
+        Id(generator.generate())
     }
 }
 
@@ -153,16 +153,18 @@ fn main() {
 
     let channels = 2;
 
+    let mut generator = GeneratorBuilder::new().build();
+
     // Create a channel to send data from Jack into the route.
-    let output_id = Id::generate_node_id();
+    let output_id = Id::generate_node_id(&mut generator);
 
     // Create the Node to host the route. Nodes have a little bit of extra information
     // that is used with the routing of the graph, such as the number of channels it has
     // and the other nodes that it's connected to.
-    let output_node: Node<Id, Sample, Routes, _> =
-        Node::with_id(output_id, channels, Routes::Output(OutputRoute), vec![]);
+    let output_node: Node<Id, Sample, Routes, _, _> =
+        Node::with_id(output_id.clone(), channels, Routes::Output(OutputRoute), vec![]);
 
-    let input_id = Id::generate_node_id();
+    let input_id = Id::generate_node_id(&mut generator);
     let input_node = Node::with_id(
         input_id,
         channels,

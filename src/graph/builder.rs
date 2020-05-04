@@ -2,32 +2,30 @@ use super::{Node, NodeId, Route, RouteGraph};
 use sample::Sample;
 use std::hash::Hash;
 
-pub struct RouteGraphBuilder<Id, S, R, C>
+pub struct RouteGraphBuilder<Id, S, R, C, G>
 where
-    Id: NodeId + Eq,
+    Id: NodeId<G> + Eq,
     S: Sample + Default,
     R: Route<S, C>,
 {
-    nodes: Vec<Node<Id, S, R, C>>,
+    nodes: Vec<Node<Id, S, R, C, G>>,
     buffer_size: usize,
-    __context: std::marker::PhantomData<*const C>,
 }
 
-impl<Id, S, R, C> RouteGraphBuilder<Id, S, R, C>
+impl<Id, S, R, C, G> RouteGraphBuilder<Id, S, R, C, G>
 where
-    Id: Eq + Hash + Copy + NodeId,
+    Id: Eq + Hash + NodeId<G>,
     S: Sample + Default,
     R: Route<S, C>,
 {
-    pub fn new() -> RouteGraphBuilder<Id, S, R, C> {
-        RouteGraphBuilder {
+    pub fn new() -> Self {
+        Self {
             nodes: vec![],
             buffer_size: 1024,
-            __context: std::marker::PhantomData::default(),
         }
     }
 
-    pub fn with_node(mut self, node: Node<Id, S, R, C>) -> Self {
+    pub fn with_node(mut self, node: Node<Id, S, R, C, G>) -> Self {
         self.nodes.push(node);
         self
     }
@@ -37,23 +35,23 @@ where
         self
     }
 
-    pub fn with_nodes(mut self, mut nodes: Vec<Node<Id, S, R, C>>) -> Self {
+    pub fn with_nodes(mut self, mut nodes: Vec<Node<Id, S, R, C, G>>) -> Self {
         self.nodes.extend(nodes.drain(..));
         self
     }
 
-    pub fn build(self) -> RouteGraph<Id, S, R, C> {
+    pub fn build(self) -> RouteGraph<Id, S, R, C, G> {
         RouteGraph::with_nodes(self.nodes, self.buffer_size)
     }
 }
 
-impl<Id, S, R, C> Default for RouteGraphBuilder<Id, S, R, C>
+impl<Id, S, R, C, G> Default for RouteGraphBuilder<Id, S, R, C, G>
 where
-    Id: Eq + Hash + Copy + NodeId,
+    Id: Eq + Hash + NodeId<G>,
     S: Sample + Default,
     R: Route<S, C>,
 {
-    fn default() -> RouteGraphBuilder<Id, S, R, C> {
+    fn default() -> Self {
         RouteGraphBuilder::new()
     }
 }

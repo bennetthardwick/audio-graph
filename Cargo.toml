@@ -25,6 +25,8 @@ dsp-chain = "0"
 lazy_static = "1"
 jack = "0.6"
 crossbeam = "0.7"
+alloc_counter = "0.0.4"
+volatile_unique_id = "0.1.1"
 
 [badges]
 travis-ci = { repository = "https://github.com/bennetthardwick/audio-graph" }
