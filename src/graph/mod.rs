@@ -7,21 +7,24 @@ pub use builder::*;
 pub use node::*;
 
 use crate::route::Route;
+use nano_arena::{Arena, ArenaAccess, Idx};
 use sample::Sample;
 use std::collections::{HashMap, HashSet};
 
 use bufferpool::{BufferPool, BufferPoolBuilder, BufferPoolReference};
 
-pub struct RouteGraph<Id: NodeId<G>, S: Sample + Default, R: Route<S, C>, C, G> {
-    ordering: Vec<Id>,
-    temp_ordering: Vec<Id>,
-    stack: Vec<Id>,
-    visited: HashSet<Id>,
+pub struct RouteGraph<S: Sample + Default, R: Route<S, C>, C> {
+    ordering: Vec<Idx>,
+
+    temp_ordering: Vec<Idx>,
+
+    stack: Vec<Idx>,
+
+    visited: Vec<bool>,
 
     temp: Vec<BufferPoolReference<S>>,
 
-    routes: Vec<Id>,
-    route_map: HashMap<Id, Node<Id, S, R, C, G>>,
+    arena: Arena<Node<S, R, C>>,
 
     max_channels: usize,
 
@@ -35,25 +38,22 @@ pub struct RouteGraph<Id: NodeId<G>, S: Sample + Default, R: Route<S, C>, C, G> 
 // references and such. But RouteGraph should be fine to send
 // between threads so long as it's routes are safe to send
 // between threads.
-unsafe impl<Id, S, R, C, G> Send for RouteGraph<Id, S, R, C, G>
+unsafe impl<S, R, C> Send for RouteGraph<S, R, C>
 where
-    Id: NodeId<G>,
     S: Sample + Default,
     R: Route<S, C> + Send,
 {
 }
 
-unsafe impl<Id, S, R, C, G> Sync for RouteGraph<Id, S, R, C, G>
+unsafe impl<S, R, C> Sync for RouteGraph<S, R, C>
 where
-    Id: NodeId<G>,
     S: Sample + Default,
     R: Route<S, C> + Send,
 {
 }
 
-impl<Id, S, R, C, G> Default for RouteGraph<Id, S, R, C, G>
+impl<S, R, C> Default for RouteGraph<S, R, C>
 where
-    Id: NodeId<G>,
     S: Sample + Default,
     R: Route<S, C>,
 {
@@ -62,55 +62,53 @@ where
     }
 }
 
-impl<Id, S, R, C, G> RouteGraph<Id, S, R, C, G>
+struct IterMutConnections<'a, S: Sample + Default, R: Route<S, C>, C> {
+    current: Idx,
+    arena: &'a mut Arena<Node<S, R, C>>,
+}
+
+impl<S, R, C> RouteGraph<S, R, C>
 where
-    Id: NodeId<G>,
     S: Sample + Default,
     R: Route<S, C>,
 {
-    pub fn with_nodes(nodes: Vec<Node<Id, S, R, C, G>>, buffer_size: usize) -> Self {
-        // Increment the ordering, visited and stack so they can be used
-        // for searching without having to alloc memeory
-        let routes = nodes
-            .iter()
-            .map(|node| node.id.clone())
-            .collect::<Vec<Id>>();
+    // pub fn with_nodes(nodes: Vec<Node<S, R, C>>, buffer_size: usize) -> Self {
+    //     // Increment the ordering, visited and stack so they can be used
+    //     // for searching without having to alloc memeory
+    //     let routes = nodes
+    //         .iter()
+    //         .map(|node| node.id.clone())
+    //         .collect::<Vec<Idx>>();
 
-        let max_channels = nodes.iter().fold(0, |a, b| a.max(b.channels));
+    //     let max_channels = nodes.iter().fold(0, |a, b| a.max(b.channels));
 
-        let capacity = nodes.len();
+    //     let capacity = nodes.len();
 
-        let route_map = nodes
-            .into_iter()
-            .map(|node| (node.id.clone(), node))
-            .collect::<HashMap<_, _>>();
+    //     let mut graph = RouteGraph {
+    //         ordering: routes.clone(),
+    //         routes,
+    //         temp_ordering: Vec::with_capacity(capacity),
+    //         visited: HashSet::with_capacity(capacity),
+    //         stack: Vec::with_capacity(capacity),
+    //         temp: Vec::with_capacity(max_channels),
+    //         max_channels,
+    //         pool: BufferPoolBuilder::new()
+    //             .with_capacity(0)
+    //             .with_buffer_size(0)
+    //             .build(),
+    //         // __context: std::marker::PhantomData::default(),
+    //         sorted: false,
+    //     };
 
-        let mut graph = RouteGraph {
-            ordering: routes.clone(),
-            routes,
-            temp_ordering: Vec::with_capacity(capacity),
-            visited: HashSet::with_capacity(capacity),
-            stack: Vec::with_capacity(capacity),
-            temp: Vec::with_capacity(max_channels),
-            max_channels,
-            route_map,
-            pool: BufferPoolBuilder::new()
-                .with_capacity(0)
-                .with_buffer_size(0)
-                .build(),
-            // __context: std::marker::PhantomData::default(),
-            sorted: false,
-        };
+    //     let buffers = graph.count_required_temp_buffers();
 
-        let buffers = graph.count_required_temp_buffers();
+    //     graph.pool = BufferPoolBuilder::new()
+    //         .with_capacity(buffers + max_channels)
+    //         .with_buffer_size(buffer_size)
+    //         .build();
 
-        graph.pool = BufferPoolBuilder::new()
-            .with_capacity(buffers + max_channels)
-            .with_buffer_size(buffer_size)
-            .build();
-
-        graph
-    }
+    //     graph
+    // }
 
     pub fn process(&mut self, frames: usize, context: &mut C) {
         if self.buffer_size() < frames {
@@ -118,15 +116,21 @@ where
         }
 
         let temp = &mut self.temp;
-        let routes = &self.routes;
-        let route_map = &mut self.route_map;
+        let arena = &mut self.arena;
+
+        let pool = &mut self.pool;
 
         for _ in 0..self.max_channels {
-            temp.push(self.pool.get_space().unwrap());
+            temp.push(pool.get_space().unwrap());
         }
 
-        for route in routes.iter() {
-            if let Some(mut current) = route_map.remove(route) {
+        let len = arena.len();
+
+        for i in 0..len {
+            if let Some((current, mut rest)) = arena
+                .get_idx_at_index(i)
+                .and_then(|idx| arena.split_at(idx))
+            {
                 let buffers = &current.buffers;
                 let node_route = &mut current.route;
                 let connections = &current.connections;
@@ -134,12 +138,10 @@ where
                 node_route.process(buffers, temp, frames, context);
 
                 for send in connections {
-                    if let Some(out_route) = route_map.get_mut(&send.id) {
+                    if let Some(out_route) = rest.get_mut(&send.id) {
                         if out_route.buffers.len() < out_route.channels {
                             for _ in 0..(out_route.channels - out_route.buffers.len()) {
-                                out_route
-                                    .buffers
-                                    .push(self.pool.get_cleared_space().unwrap());
+                                out_route.buffers.push(pool.get_cleared_space().unwrap());
                             }
                         }
 
@@ -161,10 +163,7 @@ where
                     }
                 }
 
-                // Remove the buffers that were left over from last time.
                 current.buffers.drain(..).for_each(drop);
-
-                route_map.insert(route.clone(), current);
             }
         }
 
@@ -192,19 +191,15 @@ where
         RouteGraph {
             ordering: vec![],
             temp_ordering: vec![],
+
             stack: vec![],
-            visited: HashSet::new(),
-
+            visited: vec![],
             temp: vec![],
-
-            max_channels: 0,
-
-            routes: vec![],
-            route_map: HashMap::new(),
-
+            arena: Arena::new(),
             pool: BufferPool::default(),
 
-            sorted: false,
+            max_channels: 0,
+            sorted: true,
         }
     }
 
@@ -212,25 +207,23 @@ where
         let mut count: usize = 0;
         let mut max: usize = 0;
 
-        let routes = &self.routes;
-        let route_map = &mut self.route_map;
+        let ordering = &self.ordering;
+        let arena = &mut self.arena;
 
-        for route in routes.iter() {
-            if let Some(current) = route_map.remove(route) {
+        for route in ordering.iter() {
+            if let Some(current) = arena.get(route) {
                 let connections = &current.connections;
 
                 count += current.channels;
 
                 for send in connections {
-                    if let Some(out_route) = route_map.get(&send.id) {
+                    if let Some(out_route) = arena.get(&send.id) {
                         count += out_route.channels;
                     }
                 }
 
                 max = max.max(count);
                 count -= current.channels.min(count);
-
-                route_map.insert(route.clone(), current);
             }
         }
 
@@ -240,57 +233,51 @@ where
     pub fn topographic_sort(&mut self) {
         // Set all visited elements to false
         let visited = &mut (self.visited);
-        visited.clear();
+        visited.truncate(0);
+        visited.resize(self.arena.len(), false);
 
         let ordering = &mut (self.ordering);
+        ordering.truncate(self.arena.len());
 
-        let mut index = self.routes.len();
+        let mut index = self.arena.len();
 
-        for route in self.routes.iter() {
-            if !visited.contains(route) {
+        for (id, _) in self.arena.entries() {
+            if !visited[id.value().unwrap()] {
                 // Rust Vecs don't dealloc when you resize them, so this
                 // is safe to do. Just remember to resize at the end so pushing
                 // will alloc more!
 
-                unsafe {
-                    self.stack.set_len(0);
-                    self.temp_ordering.set_len(0);
-                }
+                self.stack.truncate(0);
+                self.temp_ordering.truncate(0);
 
                 let stack = &mut (self.stack);
                 let temp_ordering = &mut (self.temp_ordering);
 
-                stack.push(route.clone());
+                stack.push(id.clone());
 
                 while let Some(current) = stack.pop() {
-                    if !visited.contains(&current) {
-                        if let Some(node) = self.route_map.get(&current) {
+                    if !visited[current.value().unwrap()] {
+                        if let Some(node) = self.arena.get(&current) {
                             for out in node.connections.iter() {
-                                if !visited.contains(&out.id) {
+                                if !visited[out.id.value().unwrap()] {
                                     stack.push(out.id.clone());
                                 }
                             }
                         }
 
-                        temp_ordering.push(current.clone());
-                        visited.insert(current);
+                        visited[current.value().unwrap()] = true;
+                        temp_ordering.push(current);
                     }
                 }
 
                 for node in temp_ordering.drain(..).rev() {
-                    if self.route_map.contains_key(&node) {
-                        index -= 1;
-                        ordering[index] = node;
-                    }
+                    index -= 1;
+                    ordering[index] = node;
                 }
             }
         }
 
-        assert_eq!(ordering.len(), self.routes.len());
-
-        for (route, ordered) in self.routes.iter_mut().zip(ordering.iter()) {
-            *route = ordered.clone();
-        }
+        assert_eq!(ordering.len(), self.arena.len());
 
         self.sorted = true;
     }
@@ -300,11 +287,11 @@ where
     }
 
     pub fn len(&self) -> usize {
-        self.routes.len()
+        self.arena.len()
     }
 
     // Set the volume / amount of a particular route
-    pub fn set_route_amount(&mut self, source: Id, target: Id, amount: S) {
+    pub fn set_route_amount(&mut self, source: Idx, target: Idx, amount: S) {
         self.with_node_connections(source, |connections| {
             if let Some(position) = connections.iter().position(|c| &c.id == &target) {
                 if amount == S::equilibrium() {
@@ -320,75 +307,76 @@ where
         });
     }
 
-    pub fn with_node<T, F: FnOnce(&mut Node<Id, S, R, C, G>) -> T>(
+    pub fn with_node<T, F: FnOnce(&mut Node<S, R, C>) -> T>(
         &mut self,
-        id: Id,
+        id: Idx,
         func: F,
     ) -> Option<T> {
-        self.route_map.get_mut(&id).map(func)
+        self.arena.get_mut(id).map(func)
     }
 
-    pub fn with_node_connections<T, F: FnOnce(&mut Vec<Connection<Id, S>>) -> T>(
+    pub fn with_node_connections<T, F: FnOnce(&mut Vec<Connection<S>>) -> T>(
         &mut self,
-        id: Id,
+        id: Idx,
         func: F,
     ) -> Option<T> {
         self.with_node(id, |node| func(&mut node.connections))
     }
 
-    pub fn remove_node(&mut self, id: Id) {
-        if let Some(position) = self.ordering.iter().position(|x| x == &id) {
-            self.ordering.swap_remove(position);
-        }
-
-        if let Some(position) = self.routes.iter().position(|x| x == &id) {
-            self.ordering.swap_remove(position);
-        }
-
-        self.route_map.remove(&id);
-
-        for (_, node) in self.route_map.iter_mut() {
+    pub fn remove_node(&mut self, id: Idx) {
+        self.arena.swap_remove(&id);
+        for node in self.arena.iter_mut() {
             node.connections.retain(|connection| &connection.id != &id);
         }
-
         self.sorted = false;
     }
 
-    pub fn add_node(&mut self, route: Node<Id, S, R, C, G>) {
-        let id = &route.id;
+    pub fn add_node_with_idx<F: FnMut(Idx) -> Node<S, R, C>>(&mut self, mut func: F) -> Idx {
+        let id = self.arena.alloc_with_idx(|id| func(id));
 
-        self.routes.push(id.clone());
-
-        // Increment the ordering, visited and stack so they can be used
-        // for searching without having to alloc memeory
-        self.ordering.push(id.clone());
-        self.temp_ordering.reserve(1);
-        self.visited.reserve(1);
-        self.stack.reserve(1);
-        self.sorted = false;
         self.pool.reserve(1);
+        self.visited.reserve(1);
 
-        self.max_channels = self.max_channels.max(route.channels);
+        id
 
-        if route.channels > self.temp.capacity() {
-            self.temp.reserve(route.channels - self.temp.capacity());
-        }
-
-        self.route_map.insert(id.clone(), route);
+        // self.ordering.id
     }
+
+    // pub fn add_node(&mut self, route: Node<S, R, C>) {
+    //     let id = &route.id;
+
+    //     self.routes.push(id.clone());
+
+    //     // Increment the ordering, visited and stack so they can be used
+    //     // for searching without having to alloc memeory
+    //     self.ordering.push(id.clone());
+    //     self.temp_ordering.reserve(1);
+    //     self.visited.reserve(1);
+    //     self.stack.reserve(1);
+    //     self.sorted = false;
+    //     self.pool.reserve(1);
+
+    //     self.max_channels = self.max_channels.max(route.channels);
+
+    //     if route.channels > self.temp.capacity() {
+    //         self.temp.reserve(route.channels - self.temp.capacity());
+    //     }
+
+    //     self.route_map.insert(id.clone(), route);
+    // }
 
     pub fn has_cycles(&mut self) -> bool {
         let visited = &mut (self.visited);
-        visited.clear();
 
-        for route_id in self.routes.iter() {
-            visited.insert(route_id.clone());
+        visited.truncate(0);
+        visited.resize(self.arena.len(), false);
 
-            if let Some(route) = self.route_map.get(route_id) {
-                for out_route in &route.connections {
-                    if visited.contains(&out_route.id) {
-                        return true;
-                    }
+        for (id, route) in self.arena.entries() {
+            visited[id.value().unwrap()] = true;
+
+            for out in &route.connections {
+                if visited[out.id.value().unwrap()] {
+                    return true;
                 }
             }
         }

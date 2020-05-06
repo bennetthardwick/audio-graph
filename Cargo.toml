@@ -18,6 +18,7 @@ keywords = [ "audio", "dsp", "graph" ]
 [dependencies]
 sample = "0.10.0"
 bufferpool = "0.1.6"
+nano_arena = "0.5.0"
 
 [dev-dependencies]
 uuid = { version = "0.8", features = ["v4"] }
@@ -26,7 +27,6 @@ lazy_static = "1"
 jack = "0.6"
 crossbeam = "0.7"
 alloc_counter = "0.0.4"
-volatile_unique_id = "0.1.1"
 
 [badges]
 travis-ci = { repository = "https://github.com/bennetthardwick/audio-graph" }

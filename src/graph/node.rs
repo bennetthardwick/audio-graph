@@ -1,45 +1,40 @@
 use crate::route::Route;
-use std::hash::Hash;
+use nano_arena::Idx;
 use sample::Sample;
 
 use bufferpool::BufferPoolReference;
 
-pub trait NodeId<Generator>: Hash + Clone + Eq {
-    fn generate_node_id(generator: &mut Generator) -> Self;
-}
-
-pub struct Connection<Id, S: Sample> {
-    pub(crate) id: Id,
+pub struct Connection<S: Sample> {
+    pub(crate) id: Idx,
     pub(crate) amount: S,
 }
 
-impl<Id, S: Sample> Connection<Id, S> {
-    pub fn new(id: Id, amount: S) -> Connection<Id, S> {
+impl<S: Sample> Connection<S> {
+    pub fn new(id: Idx, amount: S) -> Connection<S> {
         Connection { id, amount }
     }
 
-    pub fn id(&self) -> &Id {
+    pub fn id(&self) -> &Idx {
         &self.id
     }
 }
 
-pub struct Node<Id: NodeId<G>, S: Sample, R: Route<S, C>, C, G> {
-    pub(crate) id: Id,
+pub struct Node<S: Sample, R: Route<S, C>, C> {
+    pub(crate) id: Idx,
     pub(crate) channels: usize,
     pub(crate) buffers: Vec<BufferPoolReference<S>>,
-    pub(crate) connections: Vec<Connection<Id, S>>,
+    pub(crate) connections: Vec<Connection<S>>,
     pub(crate) route: R,
     __context: std::marker::PhantomData<*const C>,
-    __id_generator: std::marker::PhantomData<*const G>,
 }
 
-impl<Id: NodeId<G>, S: Sample, R: Route<S, C>, C, G> Node<Id, S, R, C, G> {
+impl<S: Sample, R: Route<S, C>, C> Node<S, R, C> {
     pub fn with_id(
-        id: Id,
+        id: Idx,
         channels: usize,
         route: R,
-        connections: Vec<Connection<Id, S>>,
-    ) -> Node<Id, S, R, C, G> {
+        connections: Vec<Connection<S>>,
+    ) -> Node<S, R, C> {
         Node {
             id,
             channels,
@@ -47,21 +42,6 @@ impl<Id: NodeId<G>, S: Sample, R: Route<S, C>, C, G> Node<Id, S, R, C, G> {
             route,
             connections,
             __context: Default::default(),
-            __id_generator: Default::default(),
         }
-    }
-
-    pub fn new(
-        channels: usize,
-        route: R,
-        connections: Vec<Connection<Id, S>>,
-        generator: &mut G,
-    ) -> Node<Id, S, R, C, G> {
-        Self::with_id(
-            Id::generate_node_id(generator),
-            channels,
-            route,
-            connections,
-        )
     }
 }
