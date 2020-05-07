@@ -1,6 +1,6 @@
 [package]
 name = "audiograph"
-version = "0.3.0"
+version = "0.4.0"
 authors = ["Bennett Hardwick <me@bennetthardwick.com>"]
 edition = "2018"
 license = "MIT"
@@ -21,7 +21,6 @@ bufferpool = "0.1.6"
 nano_arena = "0.5.1"
 
 [dev-dependencies]
-uuid = { version = "0.8", features = ["v4"] }
 dsp-chain = "0"
 lazy_static = "1"
 jack = "0.6"
