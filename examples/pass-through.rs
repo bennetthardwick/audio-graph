@@ -1,6 +1,5 @@
 use audiograph::*;
 use std::io::Read;
-use volatile_unique_id::*;
 
 // Define some strings to be used throughout the application
 const APP_NAME: &str = "pass-through-audiograph";
@@ -109,18 +108,6 @@ impl Route<Sample, Context> for OutputRoute {
     }
 }
 
-// RouteGraph also requires that each node have a unique id.
-// What Id you use is completely up to you, in this example I use
-// a library called uuid.
-#[derive(Debug, Eq, PartialEq, Clone, Hash)]
-struct Id(volatile_unique_id::Id);
-
-impl NodeId<Generator> for Id {
-    fn generate_node_id(generator: &mut Generator) -> Self {
-        Id(generator.generate())
-    }
-}
-
 // There's many ways to represent routes inside the graph. To minimise
 // the amount of heap allocations, I've opted to use an enum instead of
 // Box<dyn Route<Sample>>. This also helps if I want to convert the route
@@ -153,32 +140,27 @@ fn main() {
 
     let channels = 2;
 
-    let mut generator = GeneratorBuilder::new().build();
-
-    // Create a channel to send data from Jack into the route.
-    let output_id = Id::generate_node_id(&mut generator);
+    let buffer_size = client.buffer_size();
+    let mut graph = RouteGraphBuilder::new()
+        .with_buffer_size(buffer_size as usize)
+        .build();
 
     // Create the Node to host the route. Nodes have a little bit of extra information
     // that is used with the routing of the graph, such as the number of channels it has
     // and the other nodes that it's connected to.
-    let output_node: Node<Id, Sample, Routes, _, _> =
-        Node::with_id(output_id.clone(), channels, Routes::Output(OutputRoute), vec![]);
+    let output = graph
+        .add_node_with_idx(|id| Node::with_id(id, channels, Routes::Output(OutputRoute), vec![]));
 
-    let input_id = Id::generate_node_id(&mut generator);
-    let input_node = Node::with_id(
-        input_id,
-        channels,
-        Routes::Input(InputRoute),
-        // Connect to the output route with an amplitude of 1
-        vec![Connection::new(output_id, 1.)],
-    );
+    graph.add_node_with_idx(|id| {
+        Node::with_id(
+            id,
+            channels,
+            Routes::Input(InputRoute),
+            vec![Connection::new(output.clone(), 1.)],
+        )
+    });
 
-    // The initial buffer size for the graph. With Jack this can change all the time
-    // after the graph has been created - but this example doesn't support that.
-    let buffer_size = client.buffer_size();
-
-    // Create a graph of just the input and output nodes.
-    let mut graph = RouteGraph::with_nodes(vec![input_node, output_node], buffer_size as usize);
+    graph.topographic_sort();
 
     // Get the specifications for input and output Jack ports
     let out_spec = jack::AudioOut::default();

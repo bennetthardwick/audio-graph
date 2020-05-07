@@ -9,27 +9,17 @@ pub use node::*;
 use crate::route::Route;
 use nano_arena::{Arena, ArenaAccess, Idx};
 use sample::Sample;
-use std::collections::{HashMap, HashSet};
+use std::borrow::Borrow;
 
 use bufferpool::{BufferPool, BufferPoolBuilder, BufferPoolReference};
 
 pub struct RouteGraph<S: Sample + Default, R: Route<S, C>, C> {
     ordering: Vec<Idx>,
-
-    temp_ordering: Vec<Idx>,
-
-    stack: Vec<Idx>,
-
     visited: Vec<bool>,
-
     temp: Vec<BufferPoolReference<S>>,
-
     arena: Arena<Node<S, R, C>>,
-
     max_channels: usize,
-
     pool: BufferPool<S>,
-
     sorted: bool,
 }
 
@@ -62,9 +52,10 @@ where
     }
 }
 
-struct IterMutConnections<'a, S: Sample + Default, R: Route<S, C>, C> {
-    current: Idx,
-    arena: &'a mut Arena<Node<S, R, C>>,
+impl<S: Sample + Default, R: Route<S, C>, C> From<Arena<Node<S, R, C>>> for RouteGraph<S, R, C> {
+    fn from(arena: Arena<Node<S, R, C>>) -> Self {
+        Self::build(arena, 1024)
+    }
 }
 
 impl<S, R, C> RouteGraph<S, R, C>
@@ -72,102 +63,111 @@ where
     S: Sample + Default,
     R: Route<S, C>,
 {
-    // pub fn with_nodes(nodes: Vec<Node<S, R, C>>, buffer_size: usize) -> Self {
-    //     // Increment the ordering, visited and stack so they can be used
-    //     // for searching without having to alloc memeory
-    //     let routes = nodes
-    //         .iter()
-    //         .map(|node| node.id.clone())
-    //         .collect::<Vec<Idx>>();
+    pub(crate) fn build(arena: Arena<Node<S, R, C>>, buffer_size: usize) -> Self {
+        let ordering: Vec<Idx> = Vec::with_capacity(arena.len());
 
-    //     let max_channels = nodes.iter().fold(0, |a, b| a.max(b.channels));
+        let capacity = arena.len();
+        let max_channels = arena.iter().fold(0, |a, b| a.max(b.channels));
 
-    //     let capacity = nodes.len();
+        let mut graph = Self {
+            ordering,
+            arena,
+            visited: vec![false; capacity],
+            temp: Vec::with_capacity(max_channels),
+            max_channels,
+            pool: BufferPoolBuilder::new()
+                .with_capacity(0)
+                .with_buffer_size(0)
+                .build(),
+            sorted: false,
+        };
 
-    //     let mut graph = RouteGraph {
-    //         ordering: routes.clone(),
-    //         routes,
-    //         temp_ordering: Vec::with_capacity(capacity),
-    //         visited: HashSet::with_capacity(capacity),
-    //         stack: Vec::with_capacity(capacity),
-    //         temp: Vec::with_capacity(max_channels),
-    //         max_channels,
-    //         pool: BufferPoolBuilder::new()
-    //             .with_capacity(0)
-    //             .with_buffer_size(0)
-    //             .build(),
-    //         // __context: std::marker::PhantomData::default(),
-    //         sorted: false,
-    //     };
+        graph.topographic_sort();
 
-    //     let buffers = graph.count_required_temp_buffers();
+        let buffer_count = graph.count_required_temp_buffers();
 
-    //     graph.pool = BufferPoolBuilder::new()
-    //         .with_capacity(buffers + max_channels)
-    //         .with_buffer_size(buffer_size)
-    //         .build();
+        graph.pool = BufferPoolBuilder::new()
+            .with_capacity(buffer_count + max_channels)
+            .with_buffer_size(buffer_size)
+            .build();
 
-    //     graph
-    // }
+        graph
+    }
 
-    pub fn process(&mut self, frames: usize, context: &mut C) {
-        if self.buffer_size() < frames {
-            self.set_buffer_size(frames);
-        }
-
+    fn process_parts<I: Iterator<Item = usize>>(&mut self, ranges: I, context: &mut C) {
         let temp = &mut self.temp;
         let arena = &mut self.arena;
 
         let pool = &mut self.pool;
 
-        for _ in 0..self.max_channels {
-            temp.push(pool.get_space().unwrap());
-        }
-
         let len = arena.len();
 
-        for i in 0..len {
-            if let Some((current, mut rest)) = arena
-                .get_idx_at_index(i)
-                .and_then(|idx| arena.split_at(idx))
-            {
-                let buffers = &current.buffers;
-                let node_route = &mut current.route;
-                let connections = &current.connections;
+        for frames in ranges {
+            for i in 0..len {
+                if let Some((current, mut rest)) = arena
+                    .get_idx_at_index(i)
+                    .and_then(|idx| arena.split_at(idx))
+                {
+                    let buffers = &current.buffers;
+                    let node_route = &mut current.route;
+                    let connections = &current.connections;
 
-                node_route.process(buffers, temp, frames, context);
+                    node_route.process(buffers, temp, frames, context);
 
-                for send in connections {
-                    if let Some(out_route) = rest.get_mut(&send.id) {
-                        if out_route.buffers.len() < out_route.channels {
-                            for _ in 0..(out_route.channels - out_route.buffers.len()) {
-                                out_route.buffers.push(pool.get_cleared_space().unwrap());
+                    for send in connections {
+                        if let Some(out_route) = rest.get_mut(&send.id) {
+                            if out_route.buffers.len() < out_route.channels {
+                                for _ in 0..(out_route.channels - out_route.buffers.len()) {
+                                    out_route.buffers.push(pool.get_cleared_space().unwrap());
+                                }
                             }
-                        }
 
-                        for (output_vector, input_vector) in
-                            out_route.buffers.iter_mut().zip(temp.iter())
-                        {
-                            for (output, input) in output_vector
-                                .as_mut()
-                                .iter_mut()
-                                .zip(input_vector.as_ref().iter())
+                            for (output_vector, input_vector) in
+                                out_route.buffers.iter_mut().zip(temp.iter())
                             {
-                                *output = output.add_amp(
-                                    input
-                                        .mul_amp(send.amount.to_float_sample())
-                                        .to_signed_sample(),
-                                );
+                                for (output, input) in output_vector
+                                    .as_mut()
+                                    .iter_mut()
+                                    .zip(input_vector.as_ref().iter())
+                                {
+                                    *output = output.add_amp(
+                                        input
+                                            .mul_amp(send.amount.to_float_sample())
+                                            .to_signed_sample(),
+                                    );
+                                }
                             }
                         }
                     }
-                }
 
-                current.buffers.drain(..).for_each(drop);
+                    current.buffers.drain(..).for_each(drop);
+                }
+            }
+        }
+    }
+
+    pub fn process(&mut self, frames: usize, context: &mut C) {
+        let buffer_size = self.buffer_size();
+
+        {
+            let temp = &mut self.temp;
+            let pool = &mut self.pool;
+
+            for _ in 0..self.max_channels {
+                temp.push(pool.get_space().unwrap());
             }
         }
 
-        temp.drain(..).for_each(drop);
+        if buffer_size >= frames {
+            let range = (0..1).map(|_| frames);
+            self.process_parts(range, context)
+        } else {
+            let range = (0..=((frames + buffer_size - 1) / buffer_size))
+                .map(|i| (frames - ((i.max(1) - 1) * buffer_size)).min(buffer_size));
+            self.process_parts(range, context)
+        }
+
+        self.temp.drain(..).for_each(drop);
     }
 
     /// Change the graph buffer size
@@ -190,9 +190,6 @@ where
     pub fn new() -> Self {
         RouteGraph {
             ordering: vec![],
-            temp_ordering: vec![],
-
-            stack: vec![],
             visited: vec![],
             temp: vec![],
             arena: Arena::new(),
@@ -203,31 +200,50 @@ where
         }
     }
 
-    fn count_required_temp_buffers(&mut self) -> usize {
-        let mut count: usize = 0;
-        let mut max: usize = 0;
+    fn count_buffers_for_node(&self, node: &Node<S, R, C>) -> usize {
+        let connections = &node.connections;
 
-        let ordering = &self.ordering;
-        let arena = &mut self.arena;
+        let mut count = node.channels;
 
-        for route in ordering.iter() {
-            if let Some(current) = arena.get(route) {
-                let connections = &current.connections;
-
-                count += current.channels;
-
-                for send in connections {
-                    if let Some(out_route) = arena.get(&send.id) {
-                        count += out_route.channels;
-                    }
-                }
-
-                max = max.max(count);
-                count -= current.channels.min(count);
+        for send in connections {
+            if let Some(out_route) = self.arena.get(&send.id) {
+                count += out_route.channels;
             }
         }
 
+        count
+    }
+
+    fn count_required_temp_buffers(&self) -> usize {
+        let mut count: usize = 0;
+        let mut max: usize = 0;
+
+        for node in self.arena.iter() {
+            count += self.count_buffers_for_node(node);
+            max = max.max(count);
+            count -= node.channels.min(count);
+        }
+
         max
+    }
+
+    fn topographic_sort_inner(
+        visited: &mut Vec<bool>,
+        output: &mut Vec<Idx>,
+        arena: &Arena<Node<S, R, C>>,
+        input: &Node<S, R, C>,
+    ) {
+        visited[input.id().value().unwrap()] = true;
+
+        for Connection { id, .. } in input.connections.iter() {
+            if !visited[id.value().unwrap()] {
+                if let Some(node) = arena.get(id) {
+                    Self::topographic_sort_inner(visited, output, arena, node);
+                }
+            }
+        }
+
+        output.push(input.id().clone());
     }
 
     pub fn topographic_sort(&mut self) {
@@ -237,48 +253,16 @@ where
         visited.resize(self.arena.len(), false);
 
         let ordering = &mut (self.ordering);
-        ordering.truncate(self.arena.len());
+        ordering.truncate(0);
 
-        let mut index = self.arena.len();
-
-        for (id, _) in self.arena.entries() {
-            if !visited[id.value().unwrap()] {
-                // Rust Vecs don't dealloc when you resize them, so this
-                // is safe to do. Just remember to resize at the end so pushing
-                // will alloc more!
-
-                self.stack.truncate(0);
-                self.temp_ordering.truncate(0);
-
-                let stack = &mut (self.stack);
-                let temp_ordering = &mut (self.temp_ordering);
-
-                stack.push(id.clone());
-
-                while let Some(current) = stack.pop() {
-                    if !visited[current.value().unwrap()] {
-                        if let Some(node) = self.arena.get(&current) {
-                            for out in node.connections.iter() {
-                                if !visited[out.id.value().unwrap()] {
-                                    stack.push(out.id.clone());
-                                }
-                            }
-                        }
-
-                        visited[current.value().unwrap()] = true;
-                        temp_ordering.push(current);
-                    }
-                }
-
-                for node in temp_ordering.drain(..).rev() {
-                    index -= 1;
-                    ordering[index] = node;
-                }
-            }
+        for node in self.arena.iter() {
+            Self::topographic_sort_inner(visited, ordering, &self.arena, node);
         }
 
+        ordering.reverse();
         assert_eq!(ordering.len(), self.arena.len());
 
+        self.arena.apply_ordering(ordering);
         self.sorted = true;
     }
 
@@ -307,63 +291,69 @@ where
         });
     }
 
-    pub fn with_node<T, F: FnOnce(&mut Node<S, R, C>) -> T>(
+    pub fn with_node_mut<I: Borrow<Idx>, T, F: FnOnce(&mut Node<S, R, C>) -> T>(
         &mut self,
-        id: Idx,
+        id: I,
         func: F,
     ) -> Option<T> {
         self.arena.get_mut(id).map(func)
     }
 
-    pub fn with_node_connections<T, F: FnOnce(&mut Vec<Connection<S>>) -> T>(
-        &mut self,
-        id: Idx,
+    pub fn with_node<I: Borrow<Idx>, T, F: FnOnce(&Node<S, R, C>) -> T>(
+        &self,
+        id: I,
         func: F,
     ) -> Option<T> {
-        self.with_node(id, |node| func(&mut node.connections))
+        self.arena.get(id).map(func)
     }
 
-    pub fn remove_node(&mut self, id: Idx) {
-        self.arena.swap_remove(&id);
+    pub fn with_node_connections<I: Borrow<Idx>, T, F: FnOnce(&mut Vec<Connection<S>>) -> T>(
+        &mut self,
+        id: I,
+        func: F,
+    ) -> Option<T> {
+        self.with_node_mut(id, |node| func(&mut node.connections))
+    }
+
+    pub fn remove_node(&mut self, id: Idx) -> Node<S, R, C> {
+        let node = self.arena.swap_remove(&id);
         for node in self.arena.iter_mut() {
             node.connections.retain(|connection| &connection.id != &id);
         }
         self.sorted = false;
+
+        node
     }
 
-    pub fn add_node_with_idx<F: FnMut(Idx) -> Node<S, R, C>>(&mut self, mut func: F) -> Idx {
+    pub fn add_node_with_idx<F: Send + FnMut(Idx) -> Node<S, R, C>>(&mut self, mut func: F) -> Idx {
         let id = self.arena.alloc_with_idx(|id| func(id));
 
         self.pool.reserve(1);
         self.visited.reserve(1);
+        self.ordering.reserve(1);
+
+        let (buffers, max_channels) = self
+            .with_node(&id, |node| {
+                (self.count_buffers_for_node(node), node.channels)
+            })
+            .unwrap();
+
+        self.max_channels = self.max_channels.max(max_channels);
+
+        let temp_capacity = self.temp.capacity();
+
+        self.temp
+            .reserve(temp_capacity.max(self.max_channels) - temp_capacity);
+
+        let pool_capacity = self.pool.capacity();
+
+        self.pool
+            .reserve((buffers + self.max_channels).max(pool_capacity) - pool_capacity);
+
+        self.sorted = false;
 
         id
-
-        // self.ordering.id
     }
-
-    // pub fn add_node(&mut self, route: Node<S, R, C>) {
-    //     let id = &route.id;
-
-    //     self.routes.push(id.clone());
-
-    //     // Increment the ordering, visited and stack so they can be used
-    //     // for searching without having to alloc memeory
-    //     self.ordering.push(id.clone());
-    //     self.temp_ordering.reserve(1);
-    //     self.visited.reserve(1);
-    //     self.stack.reserve(1);
-    //     self.sorted = false;
-    //     self.pool.reserve(1);
-
-    //     self.max_channels = self.max_channels.max(route.channels);
-
-    //     if route.channels > self.temp.capacity() {
-    //         self.temp.reserve(route.channels - self.temp.capacity());
-    //     }
-
-    //     self.route_map.insert(id.clone(), route);
-    // }
 
     pub fn has_cycles(&mut self) -> bool {
         let visited = &mut (self.visited);
@@ -376,6 +366,7 @@ where
 
             for out in &route.connections {
                 if visited[out.id.value().unwrap()] {
+                    self.sorted = false;
                     return true;
                 }
             }
@@ -398,22 +389,8 @@ mod tests {
     use crate::route::Route;
     use bufferpool::BufferPoolReference;
     use std::any::Any;
-    use volatile_unique_id::*;
 
     struct TestRoute;
-
-    #[derive(Clone, Debug, Eq, PartialEq, Hash)]
-    struct Id {
-        id: volatile_unique_id::Id,
-    }
-
-    impl NodeId<Generator> for Id {
-        fn generate_node_id(generator: &mut Generator) -> Self {
-            Id {
-                id: generator.generate(),
-            }
-        }
-    }
 
     trait AnyRoute<S: sample::Sample>: Route<S, C> {
         fn as_any(&self) -> &dyn Any;
@@ -422,7 +399,7 @@ mod tests {
     type S = f32;
     type C = ();
     type R = Box<dyn AnyRoute<S>>;
-    type N = Node<Id, S, R, C, Generator>;
+    type N = Node<S, R, C>;
 
     impl Route<S, C> for TestRoute {
         fn process(
@@ -474,6 +451,7 @@ mod tests {
 
     struct OutputRoute {
         output: Vec<S>,
+        position: usize,
     }
 
     impl Route<S, C> for OutputRoute {
@@ -481,14 +459,27 @@ mod tests {
             &mut self,
             input: &[BufferPoolReference<S>],
             _output: &mut [BufferPoolReference<S>],
-            _frames: usize,
+            frames: usize,
             _context: &mut C,
         ) {
+            let len = self.output.len();
+            let position = self.position;
+
+            let mut new_position = 0;
+
             for stream in input.iter() {
-                for (output, input) in self.output.iter_mut().zip(stream.as_ref().iter()) {
-                    *output = *input;
+                for (pos, input) in (0..len)
+                    .cycle()
+                    .skip(position)
+                    .zip(stream.as_ref().iter())
+                    .take(frames)
+                {
+                    self.output[pos] = *input;
+                    new_position = pos + 1;
                 }
             }
+
+            self.position = new_position;
         }
     }
 
@@ -507,10 +498,10 @@ mod tests {
             &mut self,
             _input: &[BufferPoolReference<S>],
             output: &mut [BufferPoolReference<S>],
-            _frames: usize,
+            frames: usize,
             _context: &mut C,
         ) {
-            for sample in output[0].as_mut().iter_mut() {
+            for sample in output[0].as_mut().iter_mut().take(frames) {
                 *sample = self.current as f32;
                 self.current += 1;
             }
@@ -541,7 +532,7 @@ mod tests {
         }
     }
 
-    fn create_node(id: Id, mut connections: Vec<Id>) -> N {
+    fn create_node(id: Idx, mut connections: Vec<Idx>) -> N {
         Node::with_id(
             id,
             1,
@@ -549,50 +540,46 @@ mod tests {
             connections
                 .drain(..)
                 .map(|id| Connection::new(id, 1.))
-                .collect::<Vec<Connection<Id, S>>>(),
+                .collect::<Vec<Connection<S>>>(),
         )
     }
 
     #[test]
     fn test_multiple_outs_signal_flow() {
-        let mut generator = GeneratorBuilder::new().build();
+        let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
-        let source_id = Id::generate_node_id(&mut generator);
-        let a_id = Id::generate_node_id(&mut generator);
-        let b_id = Id::generate_node_id(&mut generator);
-        let c_id = Id::generate_node_id(&mut generator);
-        let output_id = Id::generate_node_id(&mut generator);
+        let output = graph.add_node_with_idx(|id| {
+            Node::with_id(
+                id,
+                1,
+                Box::new(OutputRoute {
+                    output: vec![0.; 32],
+                    position: 0,
+                }),
+                vec![],
+            )
+        });
 
-        let source: N = Node::with_id(
-            source_id.clone(),
-            1,
-            Box::new(InputRoute {
-                input: vec![0.5; 32],
-            }),
-            vec![
-                Connection::new(a_id.clone(), 1.),
-                Connection::new(b_id.clone(), 0.5),
-                Connection::new(c_id.clone(), 0.5),
-            ],
-        );
+        let a = graph.add_node_with_idx(|id| create_node(id, vec![output.clone()]));
+        let b = graph.add_node_with_idx(|id| create_node(id, vec![output.clone()]));
+        let c = graph.add_node_with_idx(|id| create_node(id, vec![output.clone()]));
 
-        let output: N = Node::with_id(
-            output_id.clone(),
-            1,
-            Box::new(OutputRoute {
-                output: vec![0.; 32],
-            }),
-            vec![],
-        );
+        graph.add_node_with_idx(|id| {
+            Node::with_id(
+                id,
+                1,
+                Box::new(InputRoute {
+                    input: vec![0.5; 32],
+                }),
+                vec![
+                    Connection::new(a.clone(), 1.),
+                    Connection::new(b.clone(), 0.5),
+                    Connection::new(c.clone(), 0.5),
+                ],
+            )
+        });
 
-        let a = create_node(a_id.clone(), vec![output_id.clone()]);
-        let b = create_node(b_id.clone(), vec![output_id.clone()]);
-        let c = create_node(c_id.clone(), vec![output_id.clone()]);
-
-        let mut graph = RouteGraphBuilder::new()
-            .with_buffer_size(32)
-            .with_nodes(vec![source, a, b, c, output])
-            .build();
+        graph.topographic_sort();
 
         assert_eq!(graph.has_cycles(), false);
 
@@ -602,48 +589,54 @@ mod tests {
             graph.process(32, &mut c);
         });
 
-        let route = &graph.route_map.get(&output_id).unwrap().route;
+        let output = graph
+            .with_node_mut(output, |node| {
+                node.route()
+                    .as_any()
+                    .downcast_ref::<OutputRoute>()
+                    .unwrap()
+                    .output
+                    .clone()
+            })
+            .unwrap();
 
-        assert_eq!(
-            route.as_any().downcast_ref::<OutputRoute>().unwrap().output,
-            vec![1.; 32]
-        );
+        assert_eq!(output, vec![1.; 32]);
     }
 
     #[test]
     fn test_signal_flow() {
-        let mut generator = GeneratorBuilder::new().build();
-        let source_id = Id::generate_node_id(&mut generator);
-        let a_id = Id::generate_node_id(&mut generator);
-        let b_id = Id::generate_node_id(&mut generator);
-        let output_id = Id::generate_node_id(&mut generator);
+        let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
-        let source: N = Node::with_id(
-            source_id,
-            1,
-            Box::new(InputRoute {
-                input: vec![1.; 32],
-            }),
-            vec![Connection::new(a_id.clone(), 1.)],
-        );
-        let output: N = Node::with_id(
-            output_id.clone(),
-            1,
-            Box::new(OutputRoute {
-                output: vec![0.; 32],
-            }),
-            vec![],
-        );
+        let output = graph.add_node_with_idx(|id| {
+            Node::with_id(
+                id,
+                1,
+                Box::new(OutputRoute {
+                    output: vec![0.; 32],
+                    position: 0,
+                }),
+                vec![],
+            )
+        });
 
-        let a = create_node(a_id.clone(), vec![b_id.clone()]);
-        let b = create_node(b_id.clone(), vec![output_id.clone()]);
+        let a = graph.add_node_with_idx(|id| create_node(id, vec![output.clone()]));
+        let b = graph.add_node_with_idx(|id| create_node(id, vec![output.clone()]));
 
-        let mut graph: RouteGraph<Id, S, R, C, Generator> =
-            RouteGraphBuilder::new().with_buffer_size(32).build();
-        graph.add_node(source);
-        graph.add_node(a);
-        graph.add_node(b);
-        graph.add_node(output);
+        graph.add_node_with_idx(|id| {
+            Node::with_id(
+                id,
+                1,
+                Box::new(InputRoute {
+                    input: vec![1.; 32],
+                }),
+                vec![
+                    Connection::new(a.clone(), 0.5),
+                    Connection::new(b.clone(), 0.5),
+                ],
+            )
+        });
+
+        graph.topographic_sort();
 
         assert_eq!(graph.has_cycles(), false);
 
@@ -653,38 +646,44 @@ mod tests {
             graph.process(32, &mut c);
         });
 
-        let route = &graph.route_map.get(&output_id).unwrap().route;
+        let output = graph
+            .with_node_mut(output, |node| {
+                node.route()
+                    .as_any()
+                    .downcast_ref::<OutputRoute>()
+                    .unwrap()
+                    .output
+                    .clone()
+            })
+            .unwrap();
 
-        assert_eq!(
-            route.as_any().downcast_ref::<OutputRoute>().unwrap().output,
-            vec![1.; 32]
-        );
+        assert_eq!(output, vec![1.; 32]);
     }
 
     #[test]
     fn test_signal_flow_counting() {
-        let mut generator = GeneratorBuilder::new().build();
-        let source_id = Id::generate_node_id(&mut generator);
-        let output_id = Id::generate_node_id(&mut generator);
+        let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
-        let source: N = Node::with_id(
-            source_id.clone(),
-            1,
-            Box::new(CountingNode { current: 0 }),
-            vec![Connection::new(output_id.clone(), 1.)],
-        );
-        let output: N = Node::with_id(
-            output_id.clone(),
-            1,
-            Box::new(OutputRoute {
-                output: vec![0.; 1024],
-            }),
-            vec![],
-        );
+        let output = graph.add_node_with_idx(|id| {
+            Node::with_id(
+                id,
+                1,
+                Box::new(OutputRoute {
+                    output: vec![0.; 1024],
+                    position: 0,
+                }),
+                vec![],
+            )
+        });
 
-        let mut graph = RouteGraphBuilder::new().with_buffer_size(1024).build();
-        graph.add_node(source);
-        graph.add_node(output);
+        graph.add_node_with_idx(|id| {
+            Node::with_id(
+                id,
+                1,
+                Box::new(CountingNode { current: 0 }),
+                vec![Connection::new(output.clone(), 1.)],
+            )
+        });
 
         let mut c = ();
 
@@ -697,128 +696,95 @@ mod tests {
             *value = index as f32;
         }
 
-        let route = &graph.route_map.get(&output_id).unwrap().route;
+        let output = graph
+            .with_node_mut(output, |node| {
+                node.route()
+                    .as_any()
+                    .downcast_ref::<OutputRoute>()
+                    .unwrap()
+                    .output
+                    .clone()
+            })
+            .unwrap();
 
-        assert_eq!(
-            route.as_any().downcast_ref::<OutputRoute>().unwrap().output,
-            test
-        );
+        assert_eq!(output, test);
     }
 
     #[test]
     fn test_simple_topo_sort() {
-        let mut generator = GeneratorBuilder::new().build();
-        let a_id = Id::generate_node_id(&mut generator);
-        let b_id = Id::generate_node_id(&mut generator);
+        let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
-        let a = create_node(a_id.clone(), vec![b_id.clone()]);
-        let b = create_node(b_id.clone(), vec![]);
+        let b = graph.add_node_with_idx(|id| create_node(id, vec![]));
+        let a = graph.add_node_with_idx(|id| create_node(id, vec![b.clone()]));
 
-        let mut graph = RouteGraph::new();
-        graph.add_node(b);
-        graph.add_node(a);
-
-        assert_eq!(graph.routes, vec![b_id.clone(), a_id.clone()]);
-        assert_eq!(graph.has_cycles(), true);
+        assert!(graph.has_cycles());
+        assert_eq!(
+            graph
+                .arena
+                .entries()
+                .map(|(id, _)| id)
+                .collect::<Vec<Idx>>(),
+            vec![b.clone(), a.clone()]
+        );
 
         graph.topographic_sort();
 
-        assert_eq!(graph.routes, vec![a_id, b_id]);
         assert_eq!(graph.has_cycles(), false);
+        assert_eq!(
+            graph
+                .arena
+                .entries()
+                .map(|(id, _)| id)
+                .collect::<Vec<Idx>>(),
+            vec![a.clone(), b.clone()]
+        );
     }
 
     #[test]
     fn test_long_line_topo_sort() {
-        let mut generator = GeneratorBuilder::new().build();
+        let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
-        let a_id = Id::generate_node_id(&mut generator);
-        let b_id = Id::generate_node_id(&mut generator);
-        let c_id = Id::generate_node_id(&mut generator);
-        let d_id = Id::generate_node_id(&mut generator);
-        let e_id = Id::generate_node_id(&mut generator);
-        let f_id = Id::generate_node_id(&mut generator);
-
-        let ids = vec![
-            a_id.clone(),
-            b_id.clone(),
-            c_id.clone(),
-            d_id.clone(),
-            e_id.clone(),
-            f_id.clone(),
-        ];
-
-        let a = create_node(a_id, vec![b_id.clone()]);
-        let b = create_node(b_id, vec![c_id.clone()]);
-        let c = create_node(c_id, vec![d_id.clone()]);
-        let d = create_node(d_id, vec![e_id.clone()]);
-        let e = create_node(e_id, vec![f_id.clone()]);
-        let f = create_node(f_id, vec![]);
-
-        let mut graph = RouteGraph::new();
-        graph.add_node(b);
-        graph.add_node(d);
-        graph.add_node(e);
-        graph.add_node(f);
-        graph.add_node(c);
-        graph.add_node(a);
+        let f = graph.add_node_with_idx(|id| create_node(id, vec![]));
+        let e = graph.add_node_with_idx(|id| create_node(id, vec![f.clone()]));
+        let d = graph.add_node_with_idx(|id| create_node(id, vec![e.clone()]));
+        let c = graph.add_node_with_idx(|id| create_node(id, vec![d.clone()]));
+        let b = graph.add_node_with_idx(|id| create_node(id, vec![c.clone()]));
+        let a = graph.add_node_with_idx(|id| create_node(id, vec![b.clone()]));
 
         assert_eq!(graph.has_cycles(), true);
-
-        graph.topographic_sort();
-
-        assert_eq!(graph.routes, ids);
-        assert_eq!(graph.has_cycles(), false);
-    }
-
-    #[test]
-    fn test_crazy_topo_sort() {
-        let mut generator = GeneratorBuilder::new().build();
-
-        let a_id = Id::generate_node_id(&mut generator);
-        let b_id = Id::generate_node_id(&mut generator);
-        let c_id = Id::generate_node_id(&mut generator);
-        let d_id = Id::generate_node_id(&mut generator);
-        let e_id = Id::generate_node_id(&mut generator);
-        let f_id = Id::generate_node_id(&mut generator);
-
-        let ids = vec![
-            a_id.clone(),
-            b_id.clone(),
-            c_id.clone(),
-            d_id.clone(),
-            e_id.clone(),
-            f_id.clone(),
-        ];
-
-        for (i, a) in ids.iter().enumerate() {
-            for (j, b) in ids.iter().enumerate() {
-                if i == j {
-                    continue;
-                }
-
-                assert_ne!(*a, *b);
-            }
-        }
-
-        let a = create_node(a_id, vec![b_id.clone(), d_id.clone()]);
-        let b = create_node(b_id, vec![]);
-        let c = create_node(c_id, vec![f_id.clone()]);
-        let d = create_node(d_id, vec![e_id.clone(), f_id.clone()]);
-        let e = create_node(e_id, vec![f_id.clone()]);
-        let f = create_node(f_id, vec![]);
-
-        let mut graph = RouteGraph::new();
-        graph.add_node(f);
-        graph.add_node(d);
-        graph.add_node(b);
-        graph.add_node(e);
-        graph.add_node(a);
-        graph.add_node(c);
-
-        assert_eq!(graph.has_cycles(), true);
+        assert_eq!(
+            graph
+                .arena
+                .entries()
+                .map(|(id, _)| id)
+                .collect::<Vec<Idx>>(),
+            vec![
+                f.clone(),
+                e.clone(),
+                d.clone(),
+                c.clone(),
+                b.clone(),
+                a.clone()
+            ]
+        );
 
         graph.topographic_sort();
 
         assert_eq!(graph.has_cycles(), false);
+        assert_eq!(
+            graph
+                .arena
+                .entries()
+                .map(|(id, _)| id)
+                .collect::<Vec<Idx>>(),
+            vec![
+                a.clone(),
+                b.clone(),
+                c.clone(),
+                d.clone(),
+                e.clone(),
+                f.clone(),
+            ]
+        );
     }
 }

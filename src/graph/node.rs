@@ -29,6 +29,15 @@ pub struct Node<S: Sample, R: Route<S, C>, C> {
 }
 
 impl<S: Sample, R: Route<S, C>, C> Node<S, R, C> {
+
+    pub fn id(&self) -> &Idx {
+        &self.id
+    }
+
+    pub fn route(&mut self) -> &mut R {
+        &mut self.route
+    }
+
     pub fn with_id(
         id: Idx,
         channels: usize,

@@ -1,11 +1,6 @@
 #[macro_use]
 extern crate lazy_static;
 
-use audiograph::NodeId;
-use std::cell::RefCell;
-use std::rc::Rc;
-use volatile_unique_id::*;
-
 use audiograph;
 
 const BUFFER_SIZE: usize = 1024 * 1024;
@@ -47,7 +42,7 @@ fn main() {
 
     #[derive(Debug)]
     struct OutputRoute {
-        buffer: Rc<RefCell<Vec<f32>>>,
+        buffer: Vec<f32>,
         offset: usize,
     }
 
@@ -59,7 +54,7 @@ fn main() {
             _frames: usize,
             _context: &mut C,
         ) {
-            let mut buffer = self.buffer.borrow_mut();
+            let buffer = &mut self.buffer;
             for (input, output) in input[0]
                 .as_ref()
                 .iter()
@@ -92,50 +87,40 @@ fn main() {
         }
     }
 
-    #[derive(Debug, Eq, PartialEq, Clone, Hash)]
-    struct Id(volatile_unique_id::Id);
-
-    impl audiograph::NodeId<Generator> for Id {
-        fn generate_node_id(generator: &mut Generator) -> Self {
-            Id(generator.generate())
-        }
-    }
-
     let test: Vec<f32> = TEST_DATA.iter().cloned().collect();
 
-    let iters = 10000;
-
-    let mut generator = GeneratorBuilder::new().build();
+    let iters = 1000;
 
     for _ in 0..iters {
-        let buffer: Vec<f32> = vec![0.; BUFFER_SIZE];
-        let buffer = Rc::new(RefCell::new(buffer));
-
-        let output_id = Id::generate_node_id(&mut generator);
-
         let buffer_size = 1024;
-        let count = BUFFER_SIZE / buffer_size;
+        let mut graph = audiograph::RouteGraphBuilder::new()
+            .with_buffer_size(buffer_size)
+            .build();
 
-        let mut graph = audiograph::RouteGraph::with_nodes(
-            vec![
-                audiograph::Node::new(
-                    1,
-                    Routes::Counting(CountingRoute { current: 0 }),
-                    vec![audiograph::Connection::new(output_id.clone(), 1.)],
-                    &mut generator,
-                ),
-                audiograph::Node::with_id(
-                    output_id,
-                    1,
-                    Routes::Output(OutputRoute {
-                        buffer: Rc::clone(&buffer),
-                        offset: 0,
-                    }),
-                    vec![],
-                ),
-            ],
-            buffer_size as usize,
-        );
+        let output = graph.add_node_with_idx(move |id| {
+            audiograph::Node::with_id(
+                id,
+                1,
+                Routes::Output(OutputRoute {
+                    buffer: vec![0.; BUFFER_SIZE],
+                    offset: 0,
+                }),
+                vec![],
+            )
+        });
+
+        graph.add_node_with_idx(|id| {
+            audiograph::Node::with_id(
+                id,
+                1,
+                Routes::Counting(CountingRoute { current: 0 }),
+                vec![audiograph::Connection::new(output.clone(), 1.)],
+            )
+        });
+
+        graph.topographic_sort();
+
+        let count = BUFFER_SIZE / buffer_size;
 
         let mut c = ();
 
@@ -143,6 +128,10 @@ fn main() {
             graph.process(buffer_size as usize, &mut c);
         }
 
-        assert_eq!(*buffer.borrow(), test);
+        if let Routes::Output(OutputRoute { buffer, .. }) = graph.remove_node(output).route() {
+            assert_eq!(*buffer, test);
+        } else {
+            panic!("Expected output route!");
+        }
     }
 }
