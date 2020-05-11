@@ -18,7 +18,7 @@ keywords = [ "audio", "dsp", "graph" ]
 [dependencies]
 sample = "0.10.0"
 bufferpool = "0.1.6"
-nano_arena = "0.5.1"
+generational-arena = "0.2.7"
 
 [dev-dependencies]
 dsp-chain = "0"

@@ -1,4 +1,5 @@
 use super::{Route, RouteGraph};
+use generational_arena::Arena;
 use sample::Sample;
 use std::marker::PhantomData;
 
@@ -29,7 +30,7 @@ where
     }
 
     pub fn build(self) -> RouteGraph<S, R, C> {
-        RouteGraph::build(Default::default(), self.buffer_size)
+        RouteGraph::build(Arena::new(), self.buffer_size)
     }
 }
 

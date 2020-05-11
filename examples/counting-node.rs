@@ -128,7 +128,9 @@ fn main() {
             graph.process(buffer_size as usize, &mut c);
         }
 
-        if let Routes::Output(OutputRoute { buffer, .. }) = graph.remove_node(output).route() {
+        if let Routes::Output(OutputRoute { buffer, .. }) =
+            graph.remove_node(output).unwrap().route()
+        {
             assert_eq!(*buffer, test);
         } else {
             panic!("Expected output route!");

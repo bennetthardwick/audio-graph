@@ -1,26 +1,26 @@
 use crate::route::Route;
-use nano_arena::Idx;
+use generational_arena::Index;
 use sample::Sample;
 
 use bufferpool::BufferPoolReference;
 
 pub struct Connection<S: Sample> {
-    pub(crate) id: Idx,
+    pub(crate) id: Index,
     pub(crate) amount: S,
 }
 
 impl<S: Sample> Connection<S> {
-    pub fn new(id: Idx, amount: S) -> Connection<S> {
+    pub fn new(id: Index, amount: S) -> Connection<S> {
         Connection { id, amount }
     }
 
-    pub fn id(&self) -> &Idx {
-        &self.id
+    pub fn id(&self) -> Index {
+        self.id
     }
 }
 
 pub struct Node<S: Sample, R: Route<S, C>, C> {
-    pub(crate) id: Idx,
+    pub(crate) id: Index,
     pub(crate) channels: usize,
     pub(crate) buffers: Vec<BufferPoolReference<S>>,
     pub(crate) connections: Vec<Connection<S>>,
@@ -30,8 +30,8 @@ pub struct Node<S: Sample, R: Route<S, C>, C> {
 
 impl<S: Sample, R: Route<S, C>, C> Node<S, R, C> {
 
-    pub fn id(&self) -> &Idx {
-        &self.id
+    pub fn id(&self) -> Index {
+        self.id
     }
 
     pub fn route(&mut self) -> &mut R {
@@ -39,7 +39,7 @@ impl<S: Sample, R: Route<S, C>, C> Node<S, R, C> {
     }
 
     pub fn with_id(
-        id: Idx,
+        id: Index,
         channels: usize,
         route: R,
         connections: Vec<Connection<S>>,

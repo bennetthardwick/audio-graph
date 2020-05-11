@@ -1,5 +1,6 @@
 extern crate bufferpool;
 
+mod arena;
 pub mod builder;
 pub mod node;
 
@@ -7,15 +8,17 @@ pub use builder::*;
 pub use node::*;
 
 use crate::route::Route;
-use nano_arena::{Arena, ArenaAccess, Idx};
+use generational_arena::{Arena, Index};
 use sample::Sample;
-use std::borrow::Borrow;
+use std::collections::HashSet;
+
+use arena::{insert_with, split_at};
 
 use bufferpool::{BufferPool, BufferPoolBuilder, BufferPoolReference};
 
 pub struct RouteGraph<S: Sample + Default, R: Route<S, C>, C> {
-    ordering: Vec<Idx>,
-    visited: Vec<bool>,
+    ordering: Vec<Index>,
+    visited: HashSet<Index>,
     temp: Vec<BufferPoolReference<S>>,
     arena: Arena<Node<S, R, C>>,
     max_channels: usize,
@@ -64,15 +67,15 @@ where
     R: Route<S, C>,
 {
     pub(crate) fn build(arena: Arena<Node<S, R, C>>, buffer_size: usize) -> Self {
-        let ordering: Vec<Idx> = Vec::with_capacity(arena.len());
+        let ordering: Vec<Index> = Vec::with_capacity(arena.len());
 
         let capacity = arena.len();
-        let max_channels = arena.iter().fold(0, |a, b| a.max(b.channels));
+        let max_channels = arena.iter().fold(0, |a, (_, b)| a.max(b.channels));
 
         let mut graph = Self {
             ordering,
             arena,
-            visited: vec![false; capacity],
+            visited: HashSet::with_capacity(capacity),
             temp: Vec::with_capacity(max_channels),
             max_channels,
             pool: BufferPoolBuilder::new()
@@ -100,14 +103,11 @@ where
 
         let pool = &mut self.pool;
 
-        let len = arena.len();
+        let ordering = &self.ordering;
 
         for frames in ranges {
-            for i in 0..len {
-                if let Some((current, mut rest)) = arena
-                    .get_idx_at_index(i)
-                    .and_then(|idx| arena.split_at(idx))
-                {
+            for id in ordering {
+                if let Some((current, mut rest)) = split_at(arena, *id) {
                     let buffers = &current.buffers;
                     let node_route = &mut current.route;
                     let connections = &current.connections;
@@ -115,7 +115,7 @@ where
                     node_route.process(buffers, temp, frames, context);
 
                     for send in connections {
-                        if let Some(out_route) = rest.get_mut(&send.id) {
+                        if let Some(out_route) = rest.get_mut(send.id) {
                             if out_route.buffers.len() < out_route.channels {
                                 for _ in 0..(out_route.channels - out_route.buffers.len()) {
                                     out_route.buffers.push(pool.get_cleared_space().unwrap());
@@ -190,7 +190,7 @@ where
     pub fn new() -> Self {
         RouteGraph {
             ordering: vec![],
-            visited: vec![],
+            visited: HashSet::new(),
             temp: vec![],
             arena: Arena::new(),
             pool: BufferPool::default(),
@@ -206,7 +206,7 @@ where
         let mut count = node.channels;
 
         for send in connections {
-            if let Some(out_route) = self.arena.get(&send.id) {
+            if let Some(out_route) = self.arena.get(send.id) {
                 count += out_route.channels;
             }
         }
@@ -218,7 +218,11 @@ where
         let mut count: usize = 0;
         let mut max: usize = 0;
 
-        for node in self.arena.iter() {
+        for (_, node) in self
+            .ordering
+            .iter()
+            .filter_map(|id| self.arena.get(*id).map(|node| (*id, node)))
+        {
             count += self.count_buffers_for_node(node);
             max = max.max(count);
             count -= node.channels.min(count);
@@ -228,41 +232,39 @@ where
     }
 
     fn topographic_sort_inner(
-        visited: &mut Vec<bool>,
-        output: &mut Vec<Idx>,
+        visited: &mut HashSet<Index>,
+        output: &mut Vec<Index>,
         arena: &Arena<Node<S, R, C>>,
         input: &Node<S, R, C>,
     ) {
-        visited[input.id().value().unwrap()] = true;
+        visited.insert(input.id());
 
         for Connection { id, .. } in input.connections.iter() {
-            if !visited[id.value().unwrap()] {
-                if let Some(node) = arena.get(id) {
+            if !visited.contains(id) {
+                if let Some(node) = arena.get(*id) {
                     Self::topographic_sort_inner(visited, output, arena, node);
                 }
             }
         }
 
-        output.push(input.id().clone());
+        output.push(input.id());
     }
 
     pub fn topographic_sort(&mut self) {
         // Set all visited elements to false
         let visited = &mut (self.visited);
-        visited.truncate(0);
-        visited.resize(self.arena.len(), false);
+        visited.clear();
 
         let ordering = &mut (self.ordering);
         ordering.truncate(0);
 
-        for node in self.arena.iter() {
+        for (_, node) in self.arena.iter() {
             Self::topographic_sort_inner(visited, ordering, &self.arena, node);
         }
 
         ordering.reverse();
         assert_eq!(ordering.len(), self.arena.len());
 
-        self.arena.apply_ordering(ordering);
         self.sorted = true;
     }
 
@@ -275,7 +277,7 @@ where
     }
 
     // Set the volume / amount of a particular route
-    pub fn set_route_amount(&mut self, source: Idx, target: Idx, amount: S) {
+    pub fn set_route_amount(&mut self, source: Index, target: Index, amount: S) {
         self.with_node_connections(source, |connections| {
             if let Some(position) = connections.iter().position(|c| &c.id == &target) {
                 if amount == S::equilibrium() {
@@ -285,55 +287,55 @@ where
                 }
             } else {
                 if amount != S::equilibrium() {
-                    connections.push(Connection::new(target.clone(), amount))
+                    connections.push(Connection::new(target, amount))
                 }
             }
         });
     }
 
-    pub fn with_node_mut<I: Borrow<Idx>, T, F: FnOnce(&mut Node<S, R, C>) -> T>(
+    pub fn with_node_mut<T, F: FnOnce(&mut Node<S, R, C>) -> T>(
         &mut self,
-        id: I,
+        id: Index,
         func: F,
     ) -> Option<T> {
         self.arena.get_mut(id).map(func)
     }
 
-    pub fn with_node<I: Borrow<Idx>, T, F: FnOnce(&Node<S, R, C>) -> T>(
-        &self,
-        id: I,
-        func: F,
-    ) -> Option<T> {
+    pub fn with_node<T, F: FnOnce(&Node<S, R, C>) -> T>(&self, id: Index, func: F) -> Option<T> {
         self.arena.get(id).map(func)
     }
 
-    pub fn with_node_connections<I: Borrow<Idx>, T, F: FnOnce(&mut Vec<Connection<S>>) -> T>(
+    pub fn with_node_connections<T, F: FnOnce(&mut Vec<Connection<S>>) -> T>(
         &mut self,
-        id: I,
+        id: Index,
         func: F,
     ) -> Option<T> {
         self.with_node_mut(id, |node| func(&mut node.connections))
     }
 
-    pub fn remove_node(&mut self, id: Idx) -> Node<S, R, C> {
-        let node = self.arena.swap_remove(&id);
-        for node in self.arena.iter_mut() {
+    pub fn remove_node(&mut self, id: Index) -> Option<Node<S, R, C>> {
+        let node = self.arena.remove(id);
+
+        for (_, node) in self.arena.iter_mut() {
             node.connections.retain(|connection| &connection.id != &id);
         }
+
         self.sorted = false;
 
         node
     }
 
-    pub fn add_node_with_idx<F: Send + FnMut(Idx) -> Node<S, R, C>>(&mut self, mut func: F) -> Idx {
-        let id = self.arena.alloc_with_idx(|id| func(id));
+    pub fn add_node_with_idx<F: Send + FnMut(Index) -> Node<S, R, C>>(
+        &mut self,
+        mut func: F,
+    ) -> Index {
+        let id = insert_with(&mut self.arena, |id| func(id));
 
         self.pool.reserve(1);
         self.visited.reserve(1);
-        self.ordering.reserve(1);
 
         let (buffers, max_channels) = self
-            .with_node(&id, |node| {
+            .with_node(id, |node| {
                 (self.count_buffers_for_node(node), node.channels)
             })
             .unwrap();
@@ -352,20 +354,25 @@ where
 
         self.sorted = false;
 
+        self.ordering.push(id);
+
         id
     }
 
     pub fn has_cycles(&mut self) -> bool {
+        let ordering = &self.ordering;
+        let arena = &self.arena;
         let visited = &mut (self.visited);
+        visited.clear();
 
-        visited.truncate(0);
-        visited.resize(self.arena.len(), false);
-
-        for (id, route) in self.arena.entries() {
-            visited[id.value().unwrap()] = true;
+        for (id, route) in ordering
+            .iter()
+            .filter_map(|id| arena.get(*id).map(|node| (*id, node)))
+        {
+            visited.insert(id);
 
             for out in &route.connections {
-                if visited[out.id.value().unwrap()] {
+                if visited.contains(&out.id) {
                     self.sorted = false;
                     return true;
                 }
@@ -532,7 +539,7 @@ mod tests {
         }
     }
 
-    fn create_node(id: Idx, mut connections: Vec<Idx>) -> N {
+    fn create_node(id: Index, mut connections: Vec<Index>) -> N {
         Node::with_id(
             id,
             1,
@@ -560,9 +567,9 @@ mod tests {
             )
         });
 
-        let a = graph.add_node_with_idx(|id| create_node(id, vec![output.clone()]));
-        let b = graph.add_node_with_idx(|id| create_node(id, vec![output.clone()]));
-        let c = graph.add_node_with_idx(|id| create_node(id, vec![output.clone()]));
+        let a = graph.add_node_with_idx(|id| create_node(id, vec![output]));
+        let b = graph.add_node_with_idx(|id| create_node(id, vec![output]));
+        let c = graph.add_node_with_idx(|id| create_node(id, vec![output]));
 
         graph.add_node_with_idx(|id| {
             Node::with_id(
@@ -572,9 +579,9 @@ mod tests {
                     input: vec![0.5; 32],
                 }),
                 vec![
-                    Connection::new(a.clone(), 1.),
-                    Connection::new(b.clone(), 0.5),
-                    Connection::new(c.clone(), 0.5),
+                    Connection::new(a, 1.),
+                    Connection::new(b, 0.5),
+                    Connection::new(c, 0.5),
                 ],
             )
         });
@@ -715,29 +722,17 @@ mod tests {
         let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
         let b = graph.add_node_with_idx(|id| create_node(id, vec![]));
-        let a = graph.add_node_with_idx(|id| create_node(id, vec![b.clone()]));
+        let a = graph.add_node_with_idx(|id| create_node(id, vec![b]));
 
         assert!(graph.has_cycles());
-        assert_eq!(
-            graph
-                .arena
-                .entries()
-                .map(|(id, _)| id)
-                .collect::<Vec<Idx>>(),
-            vec![b.clone(), a.clone()]
-        );
+
+        assert_eq!(graph.ordering.clone(), vec![b.clone(), a.clone()]);
 
         graph.topographic_sort();
 
         assert_eq!(graph.has_cycles(), false);
-        assert_eq!(
-            graph
-                .arena
-                .entries()
-                .map(|(id, _)| id)
-                .collect::<Vec<Idx>>(),
-            vec![a.clone(), b.clone()]
-        );
+
+        assert_eq!(graph.ordering.clone(), vec![a.clone(), b.clone()]);
     }
 
     #[test]
@@ -745,46 +740,18 @@ mod tests {
         let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
         let f = graph.add_node_with_idx(|id| create_node(id, vec![]));
-        let e = graph.add_node_with_idx(|id| create_node(id, vec![f.clone()]));
-        let d = graph.add_node_with_idx(|id| create_node(id, vec![e.clone()]));
-        let c = graph.add_node_with_idx(|id| create_node(id, vec![d.clone()]));
-        let b = graph.add_node_with_idx(|id| create_node(id, vec![c.clone()]));
-        let a = graph.add_node_with_idx(|id| create_node(id, vec![b.clone()]));
+        let e = graph.add_node_with_idx(|id| create_node(id, vec![f]));
+        let d = graph.add_node_with_idx(|id| create_node(id, vec![e]));
+        let c = graph.add_node_with_idx(|id| create_node(id, vec![d]));
+        let b = graph.add_node_with_idx(|id| create_node(id, vec![c]));
+        let a = graph.add_node_with_idx(|id| create_node(id, vec![b]));
 
         assert_eq!(graph.has_cycles(), true);
-        assert_eq!(
-            graph
-                .arena
-                .entries()
-                .map(|(id, _)| id)
-                .collect::<Vec<Idx>>(),
-            vec![
-                f.clone(),
-                e.clone(),
-                d.clone(),
-                c.clone(),
-                b.clone(),
-                a.clone()
-            ]
-        );
+        assert_eq!(graph.ordering.clone(), vec![f, e, d, c, b, a]);
 
         graph.topographic_sort();
 
         assert_eq!(graph.has_cycles(), false);
-        assert_eq!(
-            graph
-                .arena
-                .entries()
-                .map(|(id, _)| id)
-                .collect::<Vec<Idx>>(),
-            vec![
-                a.clone(),
-                b.clone(),
-                c.clone(),
-                d.clone(),
-                e.clone(),
-                f.clone(),
-            ]
-        );
+        assert_eq!(graph.ordering.clone(), vec![a, b, c, d, e, f,]);
     }
 }
