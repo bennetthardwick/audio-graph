@@ -1,6 +1,6 @@
 [package]
 name = "audiograph"
-version = "0.5.0"
+version = "0.5.1"
 authors = ["Bennett Hardwick <me@bennetthardwick.com>"]
 edition = "2018"
 license = "MIT"
@@ -18,7 +18,7 @@ keywords = [ "audio", "dsp", "graph" ]
 [dependencies]
 sample = "0.10.0"
 bufferpool = "0.1.6"
-generational-arena = "0.2.7"
+generational-arena = { version = "0.2.7", features = ["serde"] }
 
 [dev-dependencies]
 dsp-chain = "0"
