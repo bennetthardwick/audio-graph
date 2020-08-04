@@ -4,7 +4,7 @@ use sample::Sample;
 
 use bufferpool::BufferPoolReference;
 
-pub struct Connection<S: Sample> {
+pub struct Connection<S> {
     pub(crate) id: Index,
     pub(crate) amount: S,
 }
@@ -19,17 +19,19 @@ impl<S: Sample> Connection<S> {
     }
 }
 
-pub struct Node<S: Sample, R: Route<S, C>, C> {
+pub struct Node<S, R> {
     pub(crate) id: Index,
     pub(crate) channels: usize,
     pub(crate) buffers: Vec<BufferPoolReference<S>>,
     pub(crate) connections: Vec<Connection<S>>,
     pub(crate) route: R,
-    __context: std::marker::PhantomData<*const C>,
 }
 
-impl<S: Sample, R: Route<S, C>, C> Node<S, R, C> {
-
+impl<S, R, C> Node<S, R>
+where
+    S: Sample,
+    R: Route<S, Context = C>,
+{
     pub fn id(&self) -> Index {
         self.id
     }
@@ -43,14 +45,13 @@ impl<S: Sample, R: Route<S, C>, C> Node<S, R, C> {
         channels: usize,
         route: R,
         connections: Vec<Connection<S>>,
-    ) -> Node<S, R, C> {
+    ) -> Node<S, R> {
         Node {
             id,
             channels,
             buffers: Vec::with_capacity(channels),
             route,
             connections,
-            __context: Default::default(),
         }
     }
 }

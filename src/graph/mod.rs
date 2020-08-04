@@ -16,11 +16,11 @@ use arena::{insert_with, split_at};
 
 use bufferpool::{BufferPool, BufferPoolBuilder, BufferPoolReference};
 
-pub struct RouteGraph<S: Sample + Default, R: Route<S, C>, C> {
+pub struct RouteGraph<S: Sample + Default, R> {
     ordering: Vec<Index>,
     visited: HashSet<Index>,
     temp: Vec<BufferPoolReference<S>>,
-    arena: Arena<Node<S, R, C>>,
+    arena: Arena<Node<S, R>>,
     max_channels: usize,
     pool: BufferPool<S>,
     sorted: bool,
@@ -31,42 +31,46 @@ pub struct RouteGraph<S: Sample + Default, R: Route<S, C>, C> {
 // references and such. But RouteGraph should be fine to send
 // between threads so long as it's routes are safe to send
 // between threads.
-unsafe impl<S, R, C> Send for RouteGraph<S, R, C>
+unsafe impl<S, R, C> Send for RouteGraph<S, R>
 where
     S: Sample + Default,
-    R: Route<S, C> + Send,
+    R: Route<S, Context = C> + Send,
 {
 }
 
-unsafe impl<S, R, C> Sync for RouteGraph<S, R, C>
+unsafe impl<S, R, C> Sync for RouteGraph<S, R>
 where
     S: Sample + Default,
-    R: Route<S, C> + Send,
+    R: Route<S, Context = C> + Send,
 {
 }
 
-impl<S, R, C> Default for RouteGraph<S, R, C>
+impl<S, R, C> Default for RouteGraph<S, R>
 where
     S: Sample + Default,
-    R: Route<S, C>,
+    R: Route<S, Context = C>,
 {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<S: Sample + Default, R: Route<S, C>, C> From<Arena<Node<S, R, C>>> for RouteGraph<S, R, C> {
-    fn from(arena: Arena<Node<S, R, C>>) -> Self {
+impl<S, R, C> From<Arena<Node<S, R>>> for RouteGraph<S, R>
+where
+    S: Sample + Default,
+    R: Route<S, Context = C>,
+{
+    fn from(arena: Arena<Node<S, R>>) -> Self {
         Self::build(arena, 1024)
     }
 }
 
-impl<S, R, C> RouteGraph<S, R, C>
+impl<S, R, C> RouteGraph<S, R>
 where
     S: Sample + Default,
-    R: Route<S, C>,
+    R: Route<S, Context = C>,
 {
-    pub(crate) fn build(arena: Arena<Node<S, R, C>>, buffer_size: usize) -> Self {
+    pub(crate) fn build(arena: Arena<Node<S, R>>, buffer_size: usize) -> Self {
         let ordering: Vec<Index> = Vec::with_capacity(arena.len());
 
         let capacity = arena.len();
@@ -200,7 +204,7 @@ where
         }
     }
 
-    fn count_buffers_for_node(&self, node: &Node<S, R, C>) -> usize {
+    fn count_buffers_for_node(&self, node: &Node<S, R>) -> usize {
         let connections = &node.connections;
 
         let mut count = node.channels;
@@ -234,8 +238,8 @@ where
     fn topographic_sort_inner(
         visited: &mut HashSet<Index>,
         output: &mut Vec<Index>,
-        arena: &Arena<Node<S, R, C>>,
-        input: &Node<S, R, C>,
+        arena: &Arena<Node<S, R>>,
+        input: &Node<S, R>,
     ) {
         visited.insert(input.id());
 
@@ -293,7 +297,7 @@ where
         });
     }
 
-    pub fn with_node_mut<T, F: FnOnce(&mut Node<S, R, C>) -> T>(
+    pub fn with_node_mut<T, F: FnOnce(&mut Node<S, R>) -> T>(
         &mut self,
         id: Index,
         func: F,
@@ -301,7 +305,7 @@ where
         self.arena.get_mut(id).map(func)
     }
 
-    pub fn with_node<T, F: FnOnce(&Node<S, R, C>) -> T>(&self, id: Index, func: F) -> Option<T> {
+    pub fn with_node<T, F: FnOnce(&Node<S, R>) -> T>(&self, id: Index, func: F) -> Option<T> {
         self.arena.get(id).map(func)
     }
 
@@ -313,7 +317,7 @@ where
         self.with_node_mut(id, |node| func(&mut node.connections))
     }
 
-    pub fn remove_node(&mut self, id: Index) -> Option<Node<S, R, C>> {
+    pub fn remove_node(&mut self, id: Index) -> Option<Node<S, R>> {
         let node = self.arena.remove(id);
 
         for (_, node) in self.arena.iter_mut() {
@@ -325,7 +329,7 @@ where
         node
     }
 
-    pub fn add_node_with_idx<F: Send + FnMut(Index) -> Node<S, R, C>>(
+    pub fn add_node_with_idx<F: Send + FnMut(Index) -> Node<S, R>>(
         &mut self,
         mut func: F,
     ) -> Index {
@@ -399,22 +403,24 @@ mod tests {
 
     struct TestRoute;
 
-    trait AnyRoute<S: sample::Sample>: Route<S, C> {
+    trait AnyRoute<S: sample::Sample>: Route<S> {
         fn as_any(&self) -> &dyn Any;
     }
 
     type S = f32;
     type C = ();
-    type R = Box<dyn AnyRoute<S>>;
-    type N = Node<S, R, C>;
+    type R = Box<dyn AnyRoute<S, Context = ()>>;
+    type N = Node<S, R>;
 
-    impl Route<S, C> for TestRoute {
+    impl Route<S> for TestRoute {
+        type Context = ();
+
         fn process(
             &mut self,
             input: &[BufferPoolReference<S>],
             output: &mut [BufferPoolReference<S>],
             _frames: usize,
-            _context: &mut C,
+            _context: &mut Self::Context,
         ) {
             for (a, b) in output.iter_mut().zip(input.iter()) {
                 for (output, input) in a.as_mut().iter_mut().zip(b.as_ref().iter()) {
@@ -434,13 +440,15 @@ mod tests {
         input: Vec<S>,
     }
 
-    impl Route<S, C> for InputRoute {
+    impl Route<S> for InputRoute {
+        type Context = ();
+
         fn process(
             &mut self,
             _input: &[BufferPoolReference<S>],
             output: &mut [BufferPoolReference<S>],
             _frames: usize,
-            _context: &mut C,
+            _context: &mut Self::Context,
         ) {
             for stream in output.iter_mut() {
                 for (output, input) in stream.as_mut().iter_mut().zip(self.input.iter()) {
@@ -461,13 +469,15 @@ mod tests {
         position: usize,
     }
 
-    impl Route<S, C> for OutputRoute {
+    impl Route<S> for OutputRoute {
+        type Context = ();
+
         fn process(
             &mut self,
             input: &[BufferPoolReference<S>],
             _output: &mut [BufferPoolReference<S>],
             frames: usize,
-            _context: &mut C,
+            _context: &mut Self::Context,
         ) {
             let len = self.output.len();
             let position = self.position;
@@ -500,13 +510,15 @@ mod tests {
         current: usize,
     }
 
-    impl Route<S, C> for CountingNode {
+    impl Route<S> for CountingNode {
+        type Context = ();
+
         fn process(
             &mut self,
             _input: &[BufferPoolReference<S>],
             output: &mut [BufferPoolReference<S>],
             frames: usize,
-            _context: &mut C,
+            _context: &mut Self::Context,
         ) {
             for sample in output[0].as_mut().iter_mut().take(frames) {
                 *sample = self.current as f32;
@@ -521,13 +533,15 @@ mod tests {
         }
     }
 
-    impl AnyRoute<S> for Box<dyn AnyRoute<S>> {
+    impl AnyRoute<S> for Box<dyn AnyRoute<S, Context = ()>> {
         fn as_any(&self) -> &dyn Any {
             (**self).as_any()
         }
     }
 
-    impl Route<S, C> for Box<dyn AnyRoute<S>> {
+    impl Route<S> for Box<dyn AnyRoute<S, Context = ()>> {
+        type Context = ();
+
         fn process(
             &mut self,
             input: &[BufferPoolReference<S>],
@@ -553,7 +567,7 @@ mod tests {
 
     #[test]
     fn test_multiple_outs_signal_flow() {
-        let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
+        let mut graph: RouteGraph<S, R> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
         let output = graph.add_node_with_idx(|id| {
             Node::with_id(
@@ -612,7 +626,7 @@ mod tests {
 
     #[test]
     fn test_signal_flow() {
-        let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
+        let mut graph: RouteGraph<S, R> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
         let output = graph.add_node_with_idx(|id| {
             Node::with_id(
@@ -669,7 +683,7 @@ mod tests {
 
     #[test]
     fn test_signal_flow_counting() {
-        let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
+        let mut graph: RouteGraph<S, R> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
         let output = graph.add_node_with_idx(|id| {
             Node::with_id(
@@ -719,7 +733,7 @@ mod tests {
 
     #[test]
     fn test_simple_topo_sort() {
-        let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
+        let mut graph: RouteGraph<S, R> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
         let b = graph.add_node_with_idx(|id| create_node(id, vec![]));
         let a = graph.add_node_with_idx(|id| create_node(id, vec![b]));
@@ -737,7 +751,7 @@ mod tests {
 
     #[test]
     fn test_long_line_topo_sort() {
-        let mut graph: RouteGraph<S, R, C> = RouteGraphBuilder::new().with_buffer_size(32).build();
+        let mut graph: RouteGraph<S, R> = RouteGraphBuilder::new().with_buffer_size(32).build();
 
         let f = graph.add_node_with_idx(|id| create_node(id, vec![]));
         let e = graph.add_node_with_idx(|id| create_node(id, vec![f]));

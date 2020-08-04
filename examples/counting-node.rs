@@ -21,15 +21,15 @@ fn main() {
         current: usize,
     }
 
-    type C = ();
+    impl audiograph::Route<f32> for CountingRoute {
+        type Context = ();
 
-    impl audiograph::Route<f32, C> for CountingRoute {
         fn process(
             &mut self,
             _input: &[audiograph::BufferPoolReference<f32>],
             output: &mut [audiograph::BufferPoolReference<f32>],
             _frames: usize,
-            _context: &mut C,
+            _context: &mut Self::Context,
         ) {
             let current = self.current;
             for (index, sample) in output[0].as_mut().iter_mut().enumerate() {
@@ -46,13 +46,15 @@ fn main() {
         offset: usize,
     }
 
-    impl audiograph::Route<f32, C> for OutputRoute {
+    impl audiograph::Route<f32> for OutputRoute {
+        type Context = ();
+
         fn process(
             &mut self,
             input: &[audiograph::BufferPoolReference<f32>],
             _output: &mut [audiograph::BufferPoolReference<f32>],
             _frames: usize,
-            _context: &mut C,
+            _context: &mut Self::Context,
         ) {
             let buffer = &mut self.buffer;
             for (input, output) in input[0]
@@ -72,13 +74,15 @@ fn main() {
         Output(OutputRoute),
     }
 
-    impl audiograph::Route<f32, C> for Routes {
+    impl audiograph::Route<f32> for Routes {
+        type Context = ();
+
         fn process(
             &mut self,
             input: &[audiograph::BufferPoolReference<f32>],
             output: &mut [audiograph::BufferPoolReference<f32>],
             frames: usize,
-            context: &mut C,
+            context: &mut Self::Context,
         ) {
             match self {
                 Routes::Counting(route) => route.process(input, output, frames, context),

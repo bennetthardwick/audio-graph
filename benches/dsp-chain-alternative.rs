@@ -5,8 +5,6 @@ extern crate test;
 extern crate lazy_static;
 
 use dsp::Node;
-use std::cell::RefCell;
-use std::rc::Rc;
 use test::Bencher;
 
 use audiograph;
@@ -55,7 +53,9 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
         current: usize,
     }
 
-    impl audiograph::Route<f32, ()> for CountingRoute {
+    impl audiograph::Route<f32> for CountingRoute {
+        type Context = ();
+
         fn process(
             &mut self,
             _input: &[audiograph::BufferPoolReference<f32>],
@@ -78,7 +78,9 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
         offset: usize,
     }
 
-    impl audiograph::Route<f32, ()> for OutputRoute {
+    impl audiograph::Route<f32> for OutputRoute {
+        type Context = ();
+
         fn process(
             &mut self,
             input: &[audiograph::BufferPoolReference<f32>],
@@ -104,7 +106,9 @@ fn bench_audiograph_count_to_max(b: &mut Bencher) {
         Output(OutputRoute),
     }
 
-    impl audiograph::Route<f32, ()> for Routes {
+    impl audiograph::Route<f32> for Routes {
+        type Context = ();
+
         fn process(
             &mut self,
             input: &[audiograph::BufferPoolReference<f32>],

@@ -24,7 +24,7 @@ type Sample = f32;
 // the input and output ports.
 //
 // Note: due to some lifetime issues with Rust, a bit of unsafe code is needed,
-// see here: https://users.rust-lang.org/t/phantomdata-const-t-causing-issues-with-lifetimes/41708
+// This will all be better when GATs are stabilised.
 struct Context {
     in_l_port: *const jack::Port<jack::AudioIn>,
     in_r_port: *const jack::Port<jack::AudioIn>,
@@ -67,13 +67,15 @@ impl Context {
 struct InputRoute;
 
 // Implement route for the InputRoute
-impl Route<Sample, Context> for InputRoute {
+impl Route<Sample> for InputRoute {
+    type Context = Context;
+
     fn process(
         &mut self,
         _input: &[BufferPoolReference<Sample>],
         output: &mut [BufferPoolReference<Sample>],
         _frames: usize,
-        context: &mut Context,
+        context: &mut Self::Context,
     ) {
         for (output_stream, input_stream) in output.iter_mut().zip(context.get_audio_input().iter())
         {
@@ -90,13 +92,15 @@ impl Route<Sample, Context> for InputRoute {
 // sent from within the graph back to the outside world.
 struct OutputRoute;
 
-impl Route<Sample, Context> for OutputRoute {
+impl Route<Sample> for OutputRoute {
+    type Context = Context;
+
     fn process(
         &mut self,
         input: &[BufferPoolReference<Sample>],
         _output: &mut [BufferPoolReference<Sample>],
         _frames: usize,
-        context: &mut Context,
+        context: &mut Self::Context,
     ) {
         for (output_stream, input_stream) in
             context.get_audio_output().iter_mut().zip(input.as_ref())
@@ -118,13 +122,15 @@ enum Routes {
 }
 
 // Likewise, implement Route<Sample> for the Routes enum.
-impl<'a> Route<Sample, Context> for Routes {
+impl<'a> Route<Sample> for Routes {
+    type Context = Context;
+
     fn process(
         &mut self,
         input: &[BufferPoolReference<Sample>],
         output: &mut [BufferPoolReference<Sample>],
         frames: usize,
-        context: &mut Context,
+        context: &mut Self::Context,
     ) {
         match self {
             Routes::Input(r) => r.process(input, output, frames, context),

@@ -3,19 +3,18 @@ use generational_arena::Arena;
 use sample::Sample;
 use std::marker::PhantomData;
 
-pub struct RouteGraphBuilder<S, R, C>
+pub struct RouteGraphBuilder<S, R>
 where
     S: Sample + Default,
-    R: Route<S, C>,
 {
     buffer_size: usize,
-    __data: PhantomData<(S, R, C)>,
+    __data: PhantomData<(S, R)>,
 }
 
-impl<S, R, C> RouteGraphBuilder<S, R, C>
+impl<S, R> RouteGraphBuilder<S, R>
 where
     S: Sample + Default,
-    R: Route<S, C>,
+    R: Route<S>,
 {
     pub fn new() -> Self {
         Self {
@@ -29,15 +28,15 @@ where
         self
     }
 
-    pub fn build(self) -> RouteGraph<S, R, C> {
+    pub fn build(self) -> RouteGraph<S, R> {
         RouteGraph::build(Arena::new(), self.buffer_size)
     }
 }
 
-impl<S, R, C> Default for RouteGraphBuilder<S, R, C>
+impl<S, R> Default for RouteGraphBuilder<S, R>
 where
     S: Sample + Default,
-    R: Route<S, C>,
+    R: Route<S>,
 {
     fn default() -> Self {
         RouteGraphBuilder::new()
